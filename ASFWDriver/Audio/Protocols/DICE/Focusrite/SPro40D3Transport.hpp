@@ -17,8 +17,11 @@ namespace ASFW::Audio::DICE::Focusrite::SPro40D3 {
 /// Call and destroy on the owning serialized control queue, NEVER the bus
 /// Default/completion queue: these calls block with a bounded wait. Replace the
 /// adapter after rediscovery rather than updating its route. Borrowed bus/info,
-/// registry and clock must outlive calls; registry must also outlive callbacks.
-/// Late callbacks own their state and never access this adapter or caller spans.
+/// registry and clock must outlive active calls, not detached native callbacks.
+/// Each call closes its registry fence before returning or requesting cancellation.
+/// Cancellation detaches callbacks, not necessarily the hardware transaction.
+/// Late callbacks own their buffers and never access the registry, this adapter,
+/// or caller spans. Concurrent/duplicate completions publish at most one result.
 class SPro40D3Transport final : public ISPro40D3Transport {
 public:
     static constexpr uint32_t kDefaultTimeoutMs = 2000;
@@ -40,6 +43,12 @@ public:
                      DiceWaitClock& clock = DriverKitWaitClock::Shared(),
                      uint32_t timeoutMs = kDefaultTimeoutMs);
 
+    /// Permanently close admission on the owning serialized control queue.
+    /// An already submitted call drains normally, retaining its completion fence
+    /// and buffers; subsequent calls fail locally even if the route stays current.
+    /// Rediscovery/restart must construct a new adapter.
+    void Invalidate() noexcept { admissionClosed_ = true; }
+
     [[nodiscard]] std::expected<void, IOReturn>
     WriteBlock(uint64_t address, std::span<const uint8_t> bytes) override;
     [[nodiscard]] std::expected<std::vector<uint8_t>, IOReturn>
@@ -57,6 +66,7 @@ private:
     Protocols::Ports::ProtocolRegisterIO& registerIO_;
     DiceWaitClock& clock_;
     const uint32_t timeoutMs_;
+    bool admissionClosed_{false};
 };
 
 } // namespace ASFW::Audio::DICE::Focusrite::SPro40D3

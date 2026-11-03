@@ -11,7 +11,9 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <memory>
+#include <utility>
 #include <optional>
 #include <vector>
 
@@ -25,9 +27,13 @@ using ::testing::Return;
 class SessionClock final : public Audio::DICE::DiceWaitClock {
 public:
     void SleepMs(uint32_t ms) noexcept override { now += ms; }
-    void Backoff(uint32_t) noexcept override { ++now; }
+    void Backoff(uint32_t) noexcept override {
+        ++now;
+        if (auto callback = std::exchange(onBackoff, {})) callback();
+    }
     uint64_t NowMs() const noexcept override { return now; }
     uint64_t now{10};
+    std::function<void()> onBackoff;
 };
 
 class SPro40D3SessionTests : public ::testing::Test {
@@ -53,6 +59,21 @@ protected:
                 EXPECT_EQ(gen, route.generation);
                 EXPECT_EQ(node, FW::NodeId{static_cast<uint8_t>(route.nodeId)});
                 const auto reply = sim.ReadBlock(Address(address), length);
+                if (Address(address) == D3::kDcpBaseAddress) {
+                    ++descriptorReads;
+                    if (descriptorReads == 2 && onSecondDescriptor) {
+                        auto callback = std::exchange(onSecondDescriptor, {});
+                        callback();
+                    }
+                }
+                if (std::exchange(delayDescriptor, false) ||
+                    (delayDescriptorNumber != 0 && descriptorReads == delayDescriptorNumber)) {
+                    pendingReply = [cb = std::move(cb), reply] {
+                        ASSERT_TRUE(reply);
+                        cb(Async::AsyncStatus::kSuccess, *reply);
+                    };
+                    return Async::AsyncHandle{123};
+                }
                 if (reply) cb(Async::AsyncStatus::kSuccess, *reply);
                 else cb(Async::AsyncStatus::kHardwareError, {});
                 return Async::AsyncHandle{};
@@ -80,6 +101,12 @@ protected:
                 if (reply) {
                     FW::WriteBE32(raw.data(), static_cast<uint32_t>(*reply));
                     FW::WriteBE32(raw.data() + 4, static_cast<uint32_t>(*reply >> 32));
+                    if (std::exchange(delayCas, false)) {
+                        pendingReply = [cb = std::move(cb), raw] {
+                            cb(Async::AsyncStatus::kSuccess, raw);
+                        };
+                        return Async::AsyncHandle{123};
+                    }
                     cb(Async::AsyncStatus::kSuccess, raw);
                 } else cb(Async::AsyncStatus::kHardwareError, {});
                 return Async::AsyncHandle{};
@@ -117,6 +144,16 @@ protected:
         ASSERT_TRUE(session->StartForHostValidation(route));
         ASSERT_TRUE(session->IsReady());
     }
+    void DuringStartupWait(bool registration, std::function<void()> callback) {
+        delayDescriptor = !registration;
+        delayCas = registration;
+        clock.onBackoff = [this, callback = std::move(callback)] {
+            ASSERT_TRUE(pendingReply);
+            callback();
+            auto reply = std::exchange(pendingReply, {});
+            reply();
+        };
+    }
     void Rebind(bool clearOwner = true) {
         registry.InvalidateLiveMappingsForBusReset();
         if (clearOwner) sim.BusReset();
@@ -136,7 +173,144 @@ protected:
     Testing::DICE::SPro40D3SimulatedDevice sim{[this](auto frame) { Notification(frame); }};
     std::unique_ptr<D3::SPro40D3Session> session;
     unsigned transactions{0};
+    bool delayDescriptor{false};
+    bool delayCas{false};
+    unsigned descriptorReads{0};
+    unsigned delayDescriptorNumber{0};
+    std::function<void()> onSecondDescriptor;
+    std::function<void()> pendingReply;
 };
+
+using SessionState = D3::SPro40D3Session::State;
+class SPro40D3SessionStartupTests : public SPro40D3SessionTests,
+    public ::testing::WithParamInterface<std::pair<bool, SessionState>> {};
+
+TEST_P(SPro40D3SessionStartupTests, LifecycleDuringWaitCannotPublishReadyOrReuseRevokedLease) {
+    const auto [registration, terminalState] = GetParam();
+    bool interrupted = false;
+    DuringStartupWait(registration, [&] {
+        interrupted = true;
+        EXPECT_TRUE(registry.IsCurrent(route));
+        switch (terminalState) {
+        case SessionState::Disabled: session->Stop(); break;
+        case SessionState::Removed: session->DeviceRemoved(); break;
+        case SessionState::NeedsRebind: session->OnBusReset(); break;
+        default: FAIL();
+        }
+        const auto nested = session->StartForHostValidation(route);
+        ASSERT_FALSE(nested);
+        EXPECT_EQ(nested.error(), D3::MailboxError::kBusy);
+    });
+    const auto started = session->StartForHostValidation(route);
+    ASSERT_FALSE(started);
+    EXPECT_TRUE(interrupted);
+    EXPECT_EQ(started.error(), terminalState == SessionState::NeedsRebind
+        ? D3::MailboxError::kBusReset : D3::MailboxError::kNotRegistered);
+    EXPECT_TRUE(registry.IsCurrent(route)); // No transport route failure masks the bug.
+    EXPECT_EQ(session->GetState(), terminalState);
+    EXPECT_FALSE(session->IsReady());
+    EXPECT_EQ(session->ForeignOwner(), 0U);
+    EXPECT_EQ(sim.CasCalls(), registration ? 1U : 0U);
+    if (registration) {
+        const std::array<uint8_t, 16> notification{};
+        const auto late = Deliver(notification);
+        EXPECT_TRUE(late.claimed);
+        EXPECT_EQ(late.rcode, Async::ResponseCode::AddressError);
+    }
+    const auto before = transactions;
+    session->ServiceNotifications();
+    EXPECT_FALSE(session->ReadControl32ForValidation(0, [](auto) { FAIL(); }));
+    EXPECT_EQ(transactions, before);
+    EXPECT_EQ(sim.RequestCount(), 0U);
+    EXPECT_EQ(sim.CasCalls(), registration ? 1U : 0U); // No release CAS.
+}
+
+TEST_P(SPro40D3SessionStartupTests, LifecycleDuringRegistrationDescriptorPreventsCasToRetiredLease) {
+    const auto [nativeCallback, terminalState] = GetParam();
+    constexpr uint64_t leaseOffset = 0x000100000000ULL; // First fixture hub lease.
+    const std::array<uint8_t, 16> notification{};
+    bool interrupted = false;
+    auto invalidate = [&] {
+        interrupted = true;
+        EXPECT_EQ(descriptorReads, 2U);
+        EXPECT_TRUE(registry.IsCurrent(route));
+        EXPECT_EQ(Deliver(notification, {}, leaseOffset).rcode, Async::ResponseCode::Complete);
+        switch (terminalState) {
+        case SessionState::Disabled: session->Stop(); break;
+        case SessionState::Removed: session->DeviceRemoved(); break;
+        case SessionState::NeedsRebind: session->OnBusReset(); break;
+        default: FAIL();
+        }
+        const auto nested = session->StartForHostValidation(route);
+        ASSERT_FALSE(nested);
+        EXPECT_EQ(nested.error(), D3::MailboxError::kBusy);
+        EXPECT_EQ(Deliver(notification, {}, leaseOffset).rcode, Async::ResponseCode::AddressError);
+    };
+    if (nativeCallback) {
+        onSecondDescriptor = invalidate;
+    } else {
+        delayDescriptorNumber = 2;
+        clock.onBackoff = [&] {
+            ASSERT_TRUE(pendingReply);
+            invalidate();
+            auto reply = std::exchange(pendingReply, {});
+            reply(); // The active read drains successfully despite invalidation.
+        };
+    }
+    const auto started = session->StartForHostValidation(route);
+    ASSERT_FALSE(started);
+    EXPECT_TRUE(interrupted);
+    EXPECT_EQ(started.error(), terminalState == SessionState::NeedsRebind
+        ? D3::MailboxError::kBusReset : D3::MailboxError::kNotRegistered);
+    EXPECT_EQ(session->GetState(), terminalState);
+    EXPECT_FALSE(session->IsReady());
+    EXPECT_TRUE(registry.IsCurrent(route));
+    EXPECT_EQ(session->ForeignOwner(), 0U);
+    EXPECT_EQ(transactions, 2U); // Only the two descriptor reads, no submitted CAS.
+    EXPECT_EQ(sim.CasCalls(), 0U);
+    EXPECT_EQ(sim.Owner(), D3::kDcpOwnerNone);
+    EXPECT_EQ(Deliver(notification, {}, leaseOffset).rcode, Async::ResponseCode::AddressError);
+    session->ServiceNotifications();
+    EXPECT_FALSE(session->ReadControl32ForValidation(0, [](auto) { FAIL(); }));
+    EXPECT_EQ(transactions, 2U);
+}
+
+INSTANTIATE_TEST_SUITE_P(DescriptorAndRegistration, SPro40D3SessionStartupTests,
+    ::testing::Values(std::pair{false, SessionState::Disabled},
+                      std::pair{false, SessionState::Removed},
+                      std::pair{false, SessionState::NeedsRebind},
+                      std::pair{true, SessionState::Disabled},
+                      std::pair{true, SessionState::Removed},
+                      std::pair{true, SessionState::NeedsRebind}));
+
+TEST_F(SPro40D3SessionTests, NestedStartDuringDescriptorWaitIsBusyAndOuterStartSucceeds) {
+    DuringStartupWait(false, [&] {
+        const auto nested = session->StartForHostValidation(route);
+        ASSERT_FALSE(nested);
+        EXPECT_EQ(nested.error(), D3::MailboxError::kBusy);
+    });
+    Start();
+    EXPECT_EQ(sim.CasCalls(), 1U);
+    EXPECT_FALSE(pendingReply);
+    ASSERT_TRUE(session->StartForHostValidation(route)); // Guard unwound.
+}
+
+TEST_F(SPro40D3SessionTests, NestedStartFromNativeDescriptorCallbackIsBusy) {
+    EXPECT_CALL(bus, ReadBlock(_, _, _, _, _, _)).Times(::testing::AnyNumber());
+    EXPECT_CALL(bus, ReadBlock(_, _, _, _, _, _))
+        .WillOnce([&](auto, auto, auto address, auto length, auto, auto cb) {
+            ++transactions;
+            const auto nested = session->StartForHostValidation(route);
+            EXPECT_FALSE(nested);
+            if (!nested) EXPECT_EQ(nested.error(), D3::MailboxError::kBusy);
+            const auto reply = sim.ReadBlock(Address(address), length);
+            EXPECT_TRUE(reply);
+            if (reply) cb(Async::AsyncStatus::kSuccess, *reply);
+            return Async::AsyncHandle{};
+        }).RetiresOnSaturation();
+    Start();
+    EXPECT_EQ(sim.CasCalls(), 1U);
+}
 
 TEST_F(SPro40D3SessionTests, ConstructionAndProviderDoNotOptInOrPublishCapabilities) {
     EXPECT_EQ(transactions, 0U);
@@ -263,6 +437,7 @@ TEST_F(SPro40D3SessionTests, RacingCasConflictNeverRetriesOrReleasesForeignOwner
     EXPECT_EQ(sim.CasCalls(), 1U);
     EXPECT_EQ(session->ForeignOwner(), foreign);
     session->Stop();
+    EXPECT_EQ(session->ForeignOwner(), 0U);
     EXPECT_EQ(sim.CasCalls(), 1U);
     EXPECT_EQ(sim.Owner(), foreign);
 }
@@ -271,10 +446,15 @@ TEST_F(SPro40D3SessionTests, DuplicateStartRevalidatesSameEngineAndOwnershipLoss
     Start();
     ASSERT_TRUE(session->StartForHostValidation(route));
     EXPECT_EQ(sim.CasCalls(), 1U);
+    const auto oldOwner = sim.Owner();
     sim.ForceOwner(D3::kDcpOwnerNone);
     EXPECT_FALSE(session->StartForHostValidation(route));
     EXPECT_FALSE(session->IsReady());
     EXPECT_EQ(session->ForeignOwner(), D3::kDcpOwnerNone);
+    const std::array<uint8_t, 16> notification{};
+    const auto late = Deliver(notification, {}, oldOwner);
+    EXPECT_TRUE(late.claimed);
+    EXPECT_EQ(late.rcode, Async::ResponseCode::AddressError);
     EXPECT_EQ(sim.CasCalls(), 1U);
     EXPECT_FALSE(session->ReadControl32ForValidation(0, [](auto) { FAIL(); }));
     EXPECT_EQ(sim.RequestCount(), 0U);

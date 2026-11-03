@@ -47,7 +47,12 @@ bool SPro40D3Session::ValidateReady() {
 void SPro40D3Session::Quiesce(State state) {
     // Close admission and revoke ingress BEFORE callbacks. No ownership-release
     // transaction is verified, so never call UnregisterNotificationAddress().
+    ++lifecycleEpoch_;
+    // An engine call can still be draining its descriptor read. Block its
+    // subsequent CAS/write before revoking the address it was about to publish.
+    if (transport_) transport_->Invalidate();
     if (state_ != State::Removed) state_ = state;
+    if (state != State::Failed) foreignOwner_ = 0;
     if (lease_) {
         hub_.Release(*lease_);
         lease_.reset();
@@ -69,17 +74,29 @@ void SPro40D3Session::FinishEngineCall() {
 
 std::expected<void, MailboxError>
 SPro40D3Session::StartForHostValidation(Discovery::DeviceRouteToken route) {
+    if (startInProgress_ || engineDepth_ != 0)
+        return std::unexpected(MailboxError::kBusy);
     if (state_ == State::Removed) return std::unexpected(MailboxError::kNotRegistered);
-    if (engineDepth_ != 0) return std::unexpected(MailboxError::kBusy);
+    // Cover the entire operation, including descriptor IO and cancellation
+    // callbacks, not just calls into an already constructed engine.
+    startInProgress_ = true;
+    struct StartGuard {
+        bool& inProgress;
+        ~StartGuard() { inProgress = false; }
+    } startGuard{startInProgress_};
+    const auto interrupted = [this]() -> std::expected<void, MailboxError> {
+        return std::unexpected(state_ == State::NeedsRebind
+            ? MailboxError::kBusReset : MailboxError::kNotRegistered);
+    };
     if (state_ == State::Failed)
         return std::unexpected(lastError_.value_or(MailboxError::kNotRegistered));
     if (state_ == State::Ready && (!route_ || *route_ != route)) {
         lastError_ = MailboxError::kBusReset;
+        const auto beforeQuiesce = lifecycleEpoch_;
         Quiesce(State::NeedsRebind);
-        // Cancellation callbacks can stop or permanently remove this session.
-        // An outer start must not override their lifecycle decision.
-        if (state_ != State::NeedsRebind)
-            return std::unexpected(MailboxError::kNotRegistered);
+        // Even another reset to the SAME state invalidates this attempt.
+        if (state_ != State::NeedsRebind || lifecycleEpoch_ != beforeQuiesce + 1)
+            return interrupted();
     }
     if ((state_ == State::NeedsRebind && route_ && *route_ == route) ||
         !Admits(route) ||
@@ -90,6 +107,7 @@ SPro40D3Session::StartForHostValidation(Discovery::DeviceRouteToken route) {
         return std::unexpected(*lastError_);
     }
 
+    const auto startEpoch = lifecycleEpoch_;
     if (state_ != State::Ready) {
         // Old engine has been quiesced and its callback stack has unwound.
         engine_.reset();
@@ -99,6 +117,7 @@ SPro40D3Session::StartForHostValidation(Discovery::DeviceRouteToken route) {
         foreignOwner_ = 0;
         transport_ = std::make_unique<SPro40D3Transport>(busOps_, busInfo_, registry_, route, clock_);
         const auto descriptor = ReadDcpDescriptor(*transport_);
+        if (lifecycleEpoch_ != startEpoch) return interrupted();
         if (!descriptor || descriptor->version != 2 || descriptor->maxRequestSize != 1024 ||
             descriptor->responseAreaSize != 400 ||
             descriptor->writeAddress != kDcpBaseAddress + 0x1C0 ||
@@ -119,9 +138,15 @@ SPro40D3Session::StartForHostValidation(Discovery::DeviceRouteToken route) {
         resetDelivered_ = false;
     }
 
+    // A lifecycle callback may revoke the lease during synchronous bus waits.
+    // Copy its address before entering, and never inspect it after invalidation.
+    if (!lease_) return interrupted();
+    const auto notificationOffset = lease_->offset;
     ++engineDepth_;
-    const auto registered = engine_->RegisterNotificationAddress(lease_->offset);
+    const auto registered = engine_->RegisterNotificationAddress(notificationOffset);
     --engineDepth_;
+    FinishEngineCall();
+    if (lifecycleEpoch_ != startEpoch) return interrupted();
     if (!registered) {
         // kBusy is only acceptance failure, not ownership loss.
         if (registered.error() == MailboxError::kBusy) return registered;

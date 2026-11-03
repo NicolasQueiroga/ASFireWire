@@ -19,7 +19,7 @@ namespace ASFW::Audio::DICE::Focusrite::SPro40D3 {
 /// observes a weak reference after teardown.
 class SPro40D3NotificationEndpoint final {
 public:
-    static constexpr uint32_t kAddressBytes = SPro40D3NotificationHub::kFrameBytes;
+    static constexpr uint32_t kAddressBytes = SPro40D3NotificationHub::kAddressBytes;
 
     [[nodiscard]] static std::expected<std::shared_ptr<SPro40D3NotificationEndpoint>, IOReturn>
     Create(Protocols::SBP2::AddressSpaceManager& manager,
@@ -43,6 +43,9 @@ private:
     std::shared_ptr<SPro40D3NotificationHub> hub_;
     uint64_t handle_{0};
     uint64_t address_{0};
+    // Bind/Release order: endpoint -> hub -> registry. Ingress drops this lock
+    // before entering the hub, so the injected clock may reenter retirement.
+    // The manager's weak callback pins endpoint/hub with shared ownership first.
     IOLock* lock_{nullptr};
     std::optional<SPro40D3NotificationHub::Lease> lease_;
 };

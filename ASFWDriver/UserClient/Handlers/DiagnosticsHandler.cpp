@@ -7,6 +7,7 @@
 #include "../../Audio/Diagnostics/DICE/DiceLockSnapshot.hpp"
 #include "../../Audio/Diagnostics/DICE/DiceReceiverDumpSnapshot.hpp"
 #include "../../Diagnostics/DiagnosticsService.hpp"
+#include "../../Service/DriverContext.hpp"
 #include "../../Async/AsyncSubsystem.hpp"
 #include "../../Async/Interfaces/IAsyncSubsystemPort.hpp"
 #include "../../Debug/AsyncTraceCapture.hpp"
@@ -307,9 +308,10 @@ kern_return_t DiagnosticsHandler::GetSPro40D3MailboxState(IOUserClientMethodArgu
 
     uint64_t guid = 0;
     std::memcpy(&guid, input->getBytesNoCopy(), sizeof(guid));
-    auto* controller = GetControllerCorePtr(driver_);
-    if (!controller) return kIOReturnNotReady;
-    auto manager = controller->CopySPro40D3MailboxManager();
+    // ServiceContext remains owned by the retained service while this call is
+    // active; its synchronized slot survives runtime/controller Reset.
+    auto* context = static_cast<ServiceContext*>(driver_->GetServiceContext());
+    auto manager = context ? context->CopySPro40D3MailboxManager() : nullptr;
     if (!manager) return kIOReturnNotReady;
 
     const auto cached = manager->CopyDiagnostics(guid);
@@ -329,6 +331,17 @@ kern_return_t DiagnosticsHandler::GetSPro40D3MailboxState(IOUserClientMethodArgu
     output.activationState = cached.activationState;
     output.notificationState = cached.notificationState;
     output.lastOperationStatus = cached.lastOperationStatus;
+    output.sessionToken = cached.sessionToken;
+    output.runtimeGeneration = cached.runtimeGeneration;
+    output.pendingOperations = cached.pendingOperations;
+    output.cancelledOperations = cached.cancelledOperations;
+    output.timedOutOperations = cached.timedOutOperations;
+    output.identificationState = cached.identificationState;
+    output.reservationState = cached.reservationState;
+    output.ownerProvenance = cached.ownerProvenance;
+    output.lastError = cached.lastError;
+    output.hardwareActivationDisabled = cached.hardwareActivationDisabled;
+    output.routeValid = cached.routeValid;
 
     auto* data = OSData::withBytes(&output, sizeof(output));
     if (!data) return kIOReturnNoMemory;

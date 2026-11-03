@@ -2,10 +2,14 @@
 // Copyright (c) 2026 ASFireWire Project
 
 #include "Audio/Protocols/DICE/Focusrite/SPro40D3NotificationHub.hpp"
+#include "Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.hpp"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
+#include <functional>
+#include <latch>
 #include <limits>
 #include <thread>
 
@@ -19,8 +23,12 @@ class Clock final : public ASFW::Audio::DICE::DiceWaitClock {
 public:
     void SleepMs(uint32_t ms) noexcept override { now.fetch_add(ms); }
     void Backoff(uint32_t) noexcept override { now.fetch_add(1); }
-    uint64_t NowMs() const noexcept override { return now.load(); }
+    uint64_t NowMs() const noexcept override {
+        if (onNow) onNow();
+        return now.load();
+    }
     std::atomic<uint64_t> now{0};
+    std::function<void()> onNow;
 };
 
 class SPro40D3NotificationHubTests : public testing::Test {
@@ -137,7 +145,7 @@ TEST_F(SPro40D3NotificationHubTests, RejectsWrongTcodeAndBothLengthMismatches) {
         ctx.tCode = tcode;
         EXPECT_EQ(hub.HandleLocalRequest(ctx).rcode, ResponseCode::TypeError);
     }
-    for (const uint32_t length : {0U, 15U, 17U}) {
+    for (const uint32_t length : {0U, 12U, 15U, 17U}) {
         auto ctx = Request(*lease);
         ctx.dataLength = length;
         EXPECT_EQ(hub.HandleLocalRequest(ctx).rcode, ResponseCode::DataError);
@@ -292,32 +300,78 @@ TEST_F(SPro40D3NotificationHubTests, TwoDevicesInSameGenerationRemainAttributed)
     EXPECT_EQ(second->frame[0], 22);
 }
 
-TEST_F(SPro40D3NotificationHubTests, ConcurrentIngressAndReleaseLeaveNoQueuedFrames) {
+TEST_F(SPro40D3NotificationHubTests, PausedIngressRejectsReleaseBeforeQueueCommit) {
     const auto lease = hub.Allocate(Bind());
     ASSERT_TRUE(lease);
     const auto ctx = Request(*lease);
-    std::atomic<bool> started{false};
-    std::atomic<bool> released{false};
-    std::atomic<bool> invalidResult{false};
-    std::thread ingress([&] {
-        started = true;
-        for (size_t i = 0; i < 1000; ++i) {
-            const auto code = hub.HandleLocalRequest(ctx).rcode;
-            if (code != ResponseCode::Complete && code != ResponseCode::ConflictError &&
-                code != ResponseCode::AddressError) invalidResult = true;
-        }
-        while (!released.load()) std::this_thread::yield();
-        for (size_t i = 0; i < 100; ++i) {
-            if (hub.HandleLocalRequest(ctx).rcode != ResponseCode::AddressError) {
-                invalidResult = true;
-            }
-        }
-    });
-    while (!started.load()) std::this_thread::yield();
-    hub.Release(*lease);
-    released = true;
+    std::latch entered{1};
+    std::latch resume{1};
+    clock.onNow = [&] { entered.count_down(); resume.wait(); };
+    ResponseCode result = ResponseCode::Complete;
+    std::thread ingress([&] { result = hub.HandleLocalRequest(ctx).rcode; });
+    entered.wait();
+    hub.Release(*lease); // Must not wait for ingress/clock to return.
+    EXPECT_FALSE(hub.Take(*lease));
+    resume.count_down();
     ingress.join();
-    EXPECT_FALSE(invalidResult.load());
+    clock.onNow = {};
+    EXPECT_EQ(result, ResponseCode::AddressError);
+    EXPECT_FALSE(hub.Take(*lease));
+    EXPECT_EQ(hub.HandleLocalRequest(ctx).rcode, ResponseCode::AddressError);
+}
+
+TEST_F(SPro40D3NotificationHubTests, PausedIngressRevalidatesRouteAfterSameGenerationReplug) {
+    const auto route = Bind();
+    const auto lease = hub.Allocate(route);
+    ASSERT_TRUE(lease);
+    const auto ctx = Request(*lease);
+    std::latch entered{1};
+    std::latch resume{1};
+    clock.onNow = [&] { entered.count_down(); resume.wait(); };
+    ResponseCode result = ResponseCode::Complete;
+    std::thread ingress([&] { result = hub.HandleLocalRequest(ctx).rcode; });
+    entered.wait();
+    registry.RetireDevice(route.guid);
+    const auto replacement = Bind(route.guid);
+    EXPECT_NE(replacement.deviceIncarnation, route.deviceIncarnation);
+    resume.count_down();
+    ingress.join();
+    clock.onNow = {};
+    EXPECT_EQ(result, ResponseCode::AddressError);
+    EXPECT_FALSE(hub.Take(*lease));
+}
+
+TEST_F(SPro40D3NotificationHubTests, CodecPrefixDoesNotAuthorizeShortRawIngressOrPadding) {
+    namespace D3 = ASFW::Audio::DICE::Focusrite::SPro40D3;
+    // Synthetic vector: fields follow ALSA spro40d3.rs:249-251. Neither this
+    // vector nor its deliberately nonzero suffix is a physical capture.
+    const std::array<uint8_t, 17> raw{
+        0x80, 0x80, 0x12, 0x34, 0x56, 0x78, 0x01, 0x23,
+        0x89, 0xAB, 0xCD, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF, 0x55};
+    for (size_t length = 0; length < 12; ++length) {
+        EXPECT_FALSE(D3::ParseNotification(std::span(raw).first(length))) << length;
+    }
+    for (const size_t length : {12U, 13U, 16U, 17U}) {
+        const auto decoded = D3::ParseNotification(std::span(raw).first(length));
+        ASSERT_TRUE(decoded);
+        EXPECT_EQ(decoded->responsePayloadLength, 0x0123U);
+        EXPECT_EQ(decoded->responseStatus, 0x89ABCDEFU);
+    }
+    const auto lease = hub.Allocate(Bind());
+    ASSERT_TRUE(lease);
+    for (size_t length = 0; length <= raw.size(); ++length) {
+        auto ctx = Request(*lease);
+        ctx.writePayload = std::span(raw).first(length);
+        ctx.dataLength = static_cast<uint32_t>(length);
+        EXPECT_EQ(hub.HandleLocalRequest(ctx).rcode,
+                  length == Hub::kFrameBytes ? ResponseCode::Complete : ResponseCode::DataError)
+            << length;
+    }
+    const auto notification = hub.Take(*lease);
+    ASSERT_TRUE(notification);
+    // All bytes, including the opaque suffix, survive unchanged. No decoded
+    // prefix is expanded and no suffix is cleared/synthesized by ingress.
+    EXPECT_TRUE(std::ranges::equal(notification->frame, std::span(raw).first(16)));
     EXPECT_FALSE(hub.Take(*lease));
 }
 

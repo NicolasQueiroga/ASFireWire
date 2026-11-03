@@ -95,10 +95,15 @@ Async::ResponseCode SPro40D3NotificationEndpoint::HandleWrite(
     }
     IOLockLock(lock_);
     const bool bound = lease_.has_value();
+    IOLockUnlock(lock_);
     if (!bound) {
-        IOLockUnlock(lock_);
         return Async::ResponseCode::AddressError;
     }
+    // Do not nest endpoint -> hub ingress: ingress invokes the injected clock,
+    // which may reenter Release(). The manager callback's shared_ptr pins this
+    // endpoint (and hub_) for the entire call. Release linearizes at the hub:
+    // it either clears an already-enqueued copy or rejects this pending write.
+    // A released address cannot be rebound, so no successor lease can receive it.
     const Async::LocalRequestContext request{
         .destOffset = context.destination,
         .tCode = context.tCode,
@@ -107,9 +112,7 @@ Async::ResponseCode SPro40D3NotificationEndpoint::HandleWrite(
         .writePayload = context.payload,
         .dataLength = static_cast<uint32_t>(context.payload.size()),
     };
-    const auto result = hub_->HandleLocalRequest(request).rcode;
-    IOLockUnlock(lock_);
-    return result;
+    return hub_->HandleLocalRequest(request).rcode;
 }
 
 } // namespace ASFW::Audio::DICE::Focusrite::SPro40D3

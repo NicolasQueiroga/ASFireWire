@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <functional>
+#include <latch>
 #include <thread>
 
 namespace {
@@ -19,8 +21,12 @@ class Clock final : public ASFW::Audio::DICE::DiceWaitClock {
 public:
     void SleepMs(uint32_t ms) noexcept override { now += ms; }
     void Backoff(uint32_t) noexcept override {}
-    uint64_t NowMs() const noexcept override { return now; }
-    uint64_t now{0};
+    uint64_t NowMs() const noexcept override {
+        if (onNow) onNow();
+        return now.load();
+    }
+    std::atomic<uint64_t> now{0};
+    std::function<void()> onNow;
 };
 
 class SPro40D3NotificationEndpointTests : public testing::Test {
@@ -138,10 +144,18 @@ TEST_F(SPro40D3NotificationEndpointTests, DeliversFullProvenanceAndValidatesFram
     EXPECT_EQ(lease->offset, (*endpoint)->address());
     const auto source = static_cast<uint16_t>(0xFFC0U | lease->route.nodeId);
 
+    clock.now = 42;
+    const auto original = frame;
     EXPECT_EQ(manager.ApplyRemoteWrite((*endpoint)->address(), frame, source,
                                        lease->route.generation.value, 1),
               ResponseCode::Complete);
-    ASSERT_TRUE(hub->Take(*lease));
+    frame.fill(0xEE); // No borrowed payload survives manager callback return.
+    clock.now = 99;
+    const auto notification = hub->Take(*lease);
+    ASSERT_TRUE(notification);
+    EXPECT_EQ(notification->frame, original);
+    EXPECT_EQ(notification->receivedMs, 42U);
+    frame = original;
 
     EXPECT_EQ(manager.ApplyRemoteWrite((*endpoint)->address(), frame, source + 1,
                                        lease->route.generation.value, 1),
@@ -152,10 +166,14 @@ TEST_F(SPro40D3NotificationEndpointTests, DeliversFullProvenanceAndValidatesFram
     EXPECT_EQ(manager.ApplyRemoteWrite((*endpoint)->address(), frame, source,
                                        lease->route.generation.value, 0),
               ResponseCode::TypeError);
-    EXPECT_EQ(manager.ApplyRemoteWrite((*endpoint)->address(),
-                                       std::span<const uint8_t>(frame).first(15), source,
-                                       lease->route.generation.value, 1),
-              ResponseCode::DataError);
+    // A codec-readable 12-byte prefix is not silently padded to the strict
+    // ingress policy's 16 bytes. Reservation size alone is not wire evidence.
+    for (const size_t length : {4U, 11U, 12U, 13U, 14U, 15U}) {
+        EXPECT_EQ(manager.ApplyRemoteWrite((*endpoint)->address(),
+                                           std::span<const uint8_t>(frame).first(length), source,
+                                           lease->route.generation.value, 1),
+                  ResponseCode::DataError) << length;
+    }
     EXPECT_EQ(manager.ApplyRemoteWrite((*endpoint)->address() + 1,
                                        std::span<const uint8_t>(frame).first(15), source,
                                        lease->route.generation.value, 1),
@@ -184,30 +202,51 @@ TEST_F(SPro40D3NotificationEndpointTests, ReleaseRetiresAddressAndClearsDelivery
     EXPECT_NE((*successor)->address(), address);
 }
 
-TEST_F(SPro40D3NotificationEndpointTests, ConcurrentIngressAndRetirementRejectAllLaterWrites) {
+TEST_F(SPro40D3NotificationEndpointTests, ClockCanReenterRetirementWithoutEndpointLock) {
     const auto hub = MakeHub();
     const auto endpoint = Endpoint::Create(manager, hub);
     ASSERT_TRUE(endpoint);
     const auto lease = (*endpoint)->Bind(Bind());
     ASSERT_TRUE(lease);
-    const auto source = static_cast<uint16_t>(0xFFC0U | lease->route.nodeId);
-    const auto address = (*endpoint)->address();
-    std::atomic<bool> started{false};
-    std::thread ingress([&] {
-        started.store(true, std::memory_order_release);
-        for (unsigned i = 0; i < 1000; ++i) {
-            (void)manager.ApplyRemoteWrite(address, frame, source, 7, 1);
-        }
-    });
-    while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
-    (*endpoint)->Release();
-    for (unsigned i = 0; i < 100; ++i) {
-        EXPECT_EQ(manager.ApplyRemoteWrite(address, frame, source, 7, 1),
-                  ResponseCode::AddressError);
-    }
-    ingress.join();
+    clock.onNow = [&] { (*endpoint)->Release(); };
+    EXPECT_EQ(manager.ApplyRemoteWrite((*endpoint)->address(), frame, 0xFFC3, 7, 1),
+              ResponseCode::AddressError);
+    clock.onNow = {};
     EXPECT_FALSE(hub->Take(*lease));
     EXPECT_FALSE((*endpoint)->Bind(Bind()));
+}
+
+TEST_F(SPro40D3NotificationEndpointTests, PausedIngressPinsLifetimeAndRejectsConcurrentRetirement) {
+    auto hub = MakeHub();
+    auto endpoint = Endpoint::Create(manager, hub);
+    ASSERT_TRUE(endpoint);
+    const auto lease = (*endpoint)->Bind(Bind());
+    ASSERT_TRUE(lease);
+    const auto address = (*endpoint)->address();
+    const std::weak_ptr<Endpoint> weakEndpoint = *endpoint;
+    const std::weak_ptr<Hub> weakHub = hub;
+    std::latch entered{1};
+    std::latch resume{1};
+    clock.onNow = [&] { entered.count_down(); resume.wait(); };
+    ResponseCode result = ResponseCode::Complete;
+    std::thread ingress([&] {
+        result = manager.ApplyRemoteWrite(address, frame, 0xFFC3, 7, 1);
+    });
+    entered.wait(); // Callback owns endpoint, but no endpoint/hub lock is held.
+    (*endpoint)->Release();
+    EXPECT_FALSE(hub->Take(*lease));
+    endpoint->reset();
+    hub.reset();
+    EXPECT_FALSE(weakEndpoint.expired());
+    EXPECT_FALSE(weakHub.expired());
+    resume.count_down();
+    ingress.join();
+    clock.onNow = {};
+    EXPECT_EQ(result, ResponseCode::AddressError);
+    EXPECT_TRUE(weakEndpoint.expired());
+    EXPECT_TRUE(weakHub.expired());
+    EXPECT_EQ(manager.ApplyRemoteWrite(address, frame, 0xFFC3, 7, 1),
+              ResponseCode::AddressError);
 }
 
 TEST_F(SPro40D3NotificationEndpointTests, DestroyedEndpointCannotReceiveManagerCallback) {

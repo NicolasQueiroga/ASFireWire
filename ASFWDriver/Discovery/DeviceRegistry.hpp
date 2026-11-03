@@ -51,6 +51,10 @@ public:
     [[nodiscard]] std::optional<DeviceRouteToken> CurrentRoute(Guid64 guid) const;
     [[nodiscard]] bool IsCurrent(const DeviceRouteToken& token) const noexcept;
 
+    // Last allocated route epoch, copied under the registry lock. A local
+    // metadata fence only: taking it neither invalidates routes nor performs I/O.
+    [[nodiscard]] uint64_t RouteEpochHighWatermark() const noexcept;
+
     // A successful lower-speed protocol read can tighten the link policy after
     // ROM discovery. Reject callbacks from a retired route or old generation.
     [[nodiscard]] bool LowerVerifiedLinkSpeed(const DeviceRouteToken& token,

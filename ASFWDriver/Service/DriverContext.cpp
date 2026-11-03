@@ -46,6 +46,29 @@
 #include "../SCSIController/SBP2TargetBridge.hpp"
 #include "../Scheduling/Scheduler.hpp"
 
+ServiceContext::~ServiceContext() {
+    // Service free follows runtime quiescence and user-client call drainage.
+    SetSPro40D3MailboxManager({});
+    if (mailboxManagerLock_) IOLockFree(mailboxManagerLock_);
+}
+
+std::shared_ptr<ServiceContext::MailboxManager>
+ServiceContext::CopySPro40D3MailboxManager() const {
+    if (!mailboxManagerLock_) return {};
+    IOLockLock(mailboxManagerLock_);
+    auto manager = mailboxManager_;
+    IOLockUnlock(mailboxManagerLock_);
+    return manager;
+}
+
+void ServiceContext::SetSPro40D3MailboxManager(std::shared_ptr<MailboxManager> manager) {
+    if (!mailboxManagerLock_) return; // allocation failure: diagnostics fail closed
+    IOLockLock(mailboxManagerLock_);
+    mailboxManager_.swap(manager);
+    IOLockUnlock(mailboxManagerLock_);
+    // Destruction, Stop, and user capture release happen outside the slot lock.
+}
+
 void ServiceContext::DisarmProviderNotifications() {
 #ifndef ASFW_HOST_TEST
     if (providerNotifications) {
@@ -76,6 +99,7 @@ void ServiceContext::Reset(ResetMode mode) {
     // Close the dormant TCD3070 control plane before its local-address manager,
     // registry, dispatch, or bus dependencies can disappear. Stop is local
     // only: it revokes ingress and never attempts an owner-release CAS.
+    SetSPro40D3MailboxManager({});
     if (controller) {
         controller->SetSPro40D3MailboxManager(nullptr);
     }
@@ -315,8 +339,8 @@ void DriverWiring::EnsureDeps(ASFWDriver* driver, ::ServiceContext& ctx) {
     }
 
     d.busResetStartedCallback = [&ctx] {
-        if (ctx.deps.sPro40D3MailboxManager) {
-            ctx.deps.sPro40D3MailboxManager->OnBusReset();
+        if (auto mailbox = ctx.CopySPro40D3MailboxManager()) {
+            mailbox->OnBusReset();
         }
         if (ctx.audioCoordinator) ctx.audioCoordinator->HandleBusReset();
         ctx.dvCapture.HandleBusReset(ctx.isoch);
@@ -350,13 +374,14 @@ kern_return_t DriverWiring::EnsureSbp2Deps(ASFWDriver& service, ::ServiceContext
         d.audioRuntimeRegistry->SetTimerScheduler(d.sbp2SessionScheduler.get());
     }
 
-    // Stage 2B composition is deliberately dormant. It reserves one unique,
-    // software-served notification address and a dedicated control queue but
-    // neither admits devices nor performs a remote transaction during startup.
+    // Stage 2C composition is deliberately dormant. It reserves one unique,
+    // software-served notification address, but no control queue/session/transport
+    // is constructed and startup never performs a remote transaction.
     if (!d.sPro40D3MailboxManager && d.deviceRegistry && d.sbp2AddressSpaceManager) {
         d.sPro40D3MailboxManager =
             std::make_shared<ASFW::Audio::DICE::Focusrite::SPro40D3::SPro40D3DriverKitManager>(
                 *d.deviceRegistry, *d.sbp2AddressSpaceManager);
+        ctx.SetSPro40D3MailboxManager(d.sPro40D3MailboxManager);
         if (ctx.controller) {
             ctx.controller->SetSPro40D3MailboxManager(d.sPro40D3MailboxManager);
         }

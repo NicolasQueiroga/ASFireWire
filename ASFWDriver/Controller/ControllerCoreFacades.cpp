@@ -102,8 +102,11 @@ void ControllerCore::SetSPro40D3MailboxManager(
     std::shared_ptr<Audio::DICE::Focusrite::SPro40D3::SPro40D3DriverKitManager> manager) {
     if (!sPro40D3MailboxManagerLock_) return;
     IOLockLock(sPro40D3MailboxManagerLock_);
-    sPro40D3MailboxManager_ = std::move(manager);
+    sPro40D3MailboxManager_.swap(manager);
     IOLockUnlock(sPro40D3MailboxManagerLock_);
+    // The retired manager may Stop and destroy callback captures. Never run
+    // those epilogues under the publication lock.
+    manager.reset();
 }
 
 Protocols::AVC::IAVCDiscovery* ControllerCore::GetAVCDiscovery() const {

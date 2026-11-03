@@ -26,8 +26,8 @@ SPro40D3NotificationHub::SPro40D3NotificationHub(
     : registry_(registry), clock_(clock), region_(region),
       validRegion_(region.begin < region.endExclusive &&
                    region.endExclusive <= kAddressSpaceEnd &&
-                   region.begin % kFrameBytes == 0 &&
-                   region.endExclusive % kFrameBytes == 0),
+                   region.begin % kAddressBytes == 0 &&
+                   region.endExclusive % kAddressBytes == 0),
       lock_(IOLockAlloc()), nextOffset_(region.begin) {}
 
 SPro40D3NotificationHub::~SPro40D3NotificationHub() {
@@ -65,12 +65,12 @@ SPro40D3NotificationHub::Allocate(Discovery::DeviceRouteToken route) {
     if (!lock_) return std::unexpected(kIOReturnNoMemory);
     const LockGuard guard(lock_);
     if (nextOffset_ >= region_.endExclusive ||
-        region_.endExclusive - nextOffset_ < kFrameBytes) {
+        region_.endExclusive - nextOffset_ < kAddressBytes) {
         return std::unexpected(kIOReturnNoSpace);
     }
     const auto lease = AllocateLocked(route, nextOffset_);
     if (lease) {
-        nextOffset_ += kFrameBytes; // Region validation makes this non-overflowing.
+        nextOffset_ += kAddressBytes; // Region validation makes this non-overflowing.
     }
     return lease;
 }
@@ -79,8 +79,8 @@ std::expected<SPro40D3NotificationHub::Lease, IOReturn>
 SPro40D3NotificationHub::AllocateExternal(Discovery::DeviceRouteToken route,
                                            uint64_t address) {
     if (!lock_) return std::unexpected(kIOReturnNoMemory);
-    if (address >= kAddressSpaceEnd || address % kFrameBytes != 0 ||
-        kAddressSpaceEnd - address < kFrameBytes) {
+    if (address >= kAddressSpaceEnd || address % kAddressBytes != 0 ||
+        kAddressSpaceEnd - address < kAddressBytes) {
         return std::unexpected(kIOReturnBadArgument);
     }
     const LockGuard guard(lock_);
@@ -149,9 +149,10 @@ Async::LocalRequestResult SPro40D3NotificationHub::HandleLocalRequest(
         return LocalRequestResult::Write(ResponseCode::AddressError);
     }
     if (ctx.tCode != 0x1) return LocalRequestResult::Write(ResponseCode::TypeError);
-    // Behavioral source: snd-firewire-ctl-services protocols/dice/src/focusrite/
-    // spro40d3.rs:245-259 reserves a 16-byte notification address. Preserve the
-    // entire raw frame for the engine; no protocol decode or bus reads here.
+    // ALSA protocols/dice/src/focusrite/spro40d3.rs:249-258 establishes a
+    // 12-byte decoded prefix and a 16-byte reservation, not an exact write size.
+    // Preserve the existing strict-16 policy pending physical wire evidence.
+    // This layer copies the raw frame; it neither decodes nor pads 12 -> 16.
     if (ctx.dataLength != kFrameBytes || ctx.writePayload.size() != kFrameBytes) {
         return LocalRequestResult::Write(ResponseCode::DataError);
     }

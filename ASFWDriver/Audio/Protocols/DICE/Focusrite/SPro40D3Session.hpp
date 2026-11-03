@@ -80,6 +80,10 @@ private:
     // Declaration order: engine is destroyed before its borrowed transport.
     std::unique_ptr<SPro40D3Transport> transport_;
     std::unique_ptr<SPro40D3MailboxEngine> engine_;
+    // Startup includes descriptor IO before an engine exists. Keep nested Start
+    // from replacing either object while any startup stack still borrows it.
+    bool startInProgress_{false};
+    uint64_t lifecycleEpoch_{0};
     unsigned engineDepth_{0};
     bool resetPending_{false};
     bool resetDelivered_{false};

@@ -737,6 +737,9 @@ add_device_test(SPro40D3DriverKitManagerTests
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3NotificationHub.cpp"
     "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"
 )
+# A macro flip alone must never enable production activation, even in host builds.
+target_compile_definitions(SPro40D3DriverKitManagerTests PRIVATE
+    ASFW_SPRO40D3_EXPERIMENTAL_ACTIVATION=1)
 
 add_device_test(SPro40D3SessionTests
     SPro40D3SessionTests.cpp

@@ -7,8 +7,11 @@
 #include "../mocks/MockFireWireBus.hpp"
 
 #include <array>
+#include <barrier>
 #include <functional>
+#include <latch>
 #include <memory>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,10 +29,14 @@ public:
         ++now;
         if (onBackoff) onBackoff();
     }
-    uint64_t NowMs() const noexcept override { return now; }
+    uint64_t NowMs() const noexcept override {
+        if (onNow) onNow();
+        return now;
+    }
     uint64_t now{};
     unsigned backoffs{};
     std::function<void()> onBackoff;
+    std::function<void()> onNow;
 };
 
 enum class Op { Read, Write, Cas };
@@ -41,10 +48,10 @@ protected:
         rom.bib.guid = 0xD1CE000000000002ULL;
         rom.gen = FW::Generation{19};
         rom.nodeId = 7;
-        (void)registry.UpsertFromROM(rom, Discovery::LinkPolicy{});
-        route = *registry.CurrentRoute(rom.bib.guid);
+        (void)registry->UpsertFromROM(rom, Discovery::LinkPolicy{});
+        route = *registry->CurrentRoute(rom.bib.guid);
         ON_CALL(bus, GetSpeed(FW::NodeId{7})).WillByDefault(Return(FW::FwSpeed::S400));
-        registerIO = std::make_unique<Protocols::Ports::ProtocolRegisterIO>(bus, bus, registry, route);
+        registerIO = std::make_unique<Protocols::Ports::ProtocolRegisterIO>(bus, bus, *registry, route);
         transport = MakeTransport();
     }
     std::unique_ptr<D3::SPro40D3Transport> MakeTransport(uint32_t timeout = 5) {
@@ -114,7 +121,7 @@ protected:
         EXPECT_EQ(target.nodeID, 0); // node is a separate bus argument, not packed into address
     }
     testing::NiceMock<Async::Mocks::MockFireWireBus> bus;
-    Discovery::DeviceRegistry registry;
+    std::unique_ptr<Discovery::DeviceRegistry> registry = std::make_unique<Discovery::DeviceRegistry>();
     Discovery::DeviceRouteToken route;
     Clock clock;
     std::unique_ptr<Protocols::Ports::ProtocolRegisterIO> registerIO;
@@ -169,7 +176,7 @@ TEST_P(SPro40D3TransportTests, OversizedResponseIsNotSilentlyTruncated) {
 }
 
 TEST_P(SPro40D3TransportTests, StaleRouteIsRejectedWithoutSubmitting) {
-    registry.InvalidateLiveMappingsForBusReset();
+    registry->InvalidateLiveMappingsForBusReset();
     EXPECT_CALL(bus, ReadBlock(_, _, _, _, _, _)).Times(0);
     EXPECT_CALL(bus, WriteBlock(_, _, _, _, _, _)).Times(0);
     EXPECT_CALL(bus, Lock(_, _, _, _, _, _, _, _)).Times(0);
@@ -180,7 +187,7 @@ TEST_P(SPro40D3TransportTests, RouteInvalidatedBeforeCompletionRejectsEvenSucces
     Async::InterfaceCompletionCallback saved;
     ExpectSubmit(GetParam(), [&](auto cb) { saved = std::move(cb); });
     clock.onBackoff = [&] {
-        registry.InvalidateLiveMappingsForBusReset();
+        registry->InvalidateLiveMappingsForBusReset();
         const std::vector<uint8_t> reply(ReplyLength(GetParam()), 0);
         auto cb = std::exchange(saved, {});
         cb(Async::AsyncStatus::kSuccess, reply);
@@ -196,7 +203,7 @@ TEST_P(SPro40D3TransportTests, RouteInvalidationWithoutCompletionCancelsPromptly
     EXPECT_CALL(bus, WriteBlock(_, _, _, _, _, _)).Times(0);
     EXPECT_CALL(bus, Lock(_, _, _, _, _, _, _, _)).Times(0);
     ExpectSubmit(GetParam(), [&](auto cb) { saved = std::move(cb); });
-    clock.onBackoff = [&] { registry.InvalidateLiveMappingsForBusReset(); };
+    clock.onBackoff = [&] { registry->InvalidateLiveMappingsForBusReset(); };
     EXPECT_CALL(bus, Cancel(_)).WillOnce([](auto cancelled) {
         EXPECT_EQ(cancelled.value, handle.value);
         return false; // The bus may still deliver the held callback later.
@@ -210,7 +217,7 @@ TEST_P(SPro40D3TransportTests, RouteInvalidationWithoutCompletionCancelsPromptly
     saved(Async::AsyncStatus::kSuccess, reply);
 }
 
-TEST_P(SPro40D3TransportTests, TimeoutCancelsAndCallbackAfterAdapterDestructionIsSafe) {
+TEST_P(SPro40D3TransportTests, TimeoutDetachesCallbackBeforeAdapterAndRegistryDestruction) {
     Async::InterfaceCompletionCallback saved;
     ExpectSubmit(GetParam(), [&](auto cb) { saved = std::move(cb); });
     EXPECT_CALL(bus, Cancel(_)).WillOnce([](auto cancelled) {
@@ -220,7 +227,8 @@ TEST_P(SPro40D3TransportTests, TimeoutCancelsAndCallbackAfterAdapterDestructionI
     EXPECT_EQ(Invoke(GetParam()), kIOReturnTimeout);
     EXPECT_EQ(clock.now, 5U);
     transport.reset();
-    registry.InvalidateLiveMappingsForBusReset();
+    registerIO.reset();
+    registry.reset(); // late native callback must not even attempt IsCurrent
     const std::vector<uint8_t> reply(ReplyLength(GetParam()), 0xEF);
     saved(Async::AsyncStatus::kSuccess, reply);
     saved = {};
@@ -236,8 +244,143 @@ TEST_P(SPro40D3TransportTests, CancelCanCompleteSynchronouslyWithoutChangingTime
     EXPECT_EQ(Invoke(GetParam()), kIOReturnTimeout);
 }
 
+TEST_P(SPro40D3TransportTests, ConcurrentDuplicateCompletionsCannotOverwritePublishedResult) {
+    const std::vector<uint8_t> reply(ReplyLength(GetParam()), 0x5A);
+    ExpectSubmit(GetParam(), [&](auto cb) {
+        cb(Async::AsyncStatus::kSuccess, reply);
+        std::barrier start{3};
+        std::thread first([&] {
+            start.arrive_and_wait();
+            cb(Async::AsyncStatus::kHardwareError, {});
+        });
+        std::thread second([&] {
+            start.arrive_and_wait();
+            cb(Async::AsyncStatus::kAborted, {});
+        });
+        start.arrive_and_wait();
+        first.join();
+        second.join();
+    });
+    EXPECT_EQ(Invoke(GetParam()), kIOReturnSuccess);
+}
+
+TEST_P(SPro40D3TransportTests, ConcurrentInitialCompletionsPublishOneWholeResult) {
+    const std::vector<uint8_t> reply(ReplyLength(GetParam()), 0xA5);
+    ExpectSubmit(GetParam(), [&](auto cb) {
+        std::barrier start{3};
+        std::thread first([&] {
+            start.arrive_and_wait();
+            cb(Async::AsyncStatus::kSuccess, reply);
+        });
+        std::thread second([&] {
+            start.arrive_and_wait();
+            cb(Async::AsyncStatus::kSuccess, reply);
+        });
+        start.arrive_and_wait();
+        first.join();
+        second.join();
+    });
+    EXPECT_EQ(Invoke(GetParam()), kIOReturnSuccess);
+}
+
+TEST_P(SPro40D3TransportTests, CompletionBetweenDeadlineObservationAndAbandonmentWins) {
+    Async::InterfaceCompletionCallback saved;
+    ExpectSubmit(GetParam(), [&](auto cb) { saved = std::move(cb); });
+    bool completed = false;
+    const std::vector<uint8_t> reply(ReplyLength(GetParam()), 0x5A);
+    clock.onBackoff = [&] {
+        if (clock.now == 5) {
+            // Run has already polled Done when it next asks for the deadline.
+            clock.onNow = [&] {
+                if (std::exchange(completed, true)) return;
+                saved(Async::AsyncStatus::kSuccess, reply);
+            };
+        }
+    };
+    EXPECT_CALL(bus, Cancel(_)).Times(0);
+    EXPECT_EQ(Invoke(GetParam()), kIOReturnSuccess);
+    EXPECT_TRUE(completed);
+    EXPECT_EQ(clock.now, 5U);
+}
+
+TEST_P(SPro40D3TransportTests, SuccessAlsoDetachesDuplicateAfterRegistryDestruction) {
+    Async::InterfaceCompletionCallback saved;
+    const std::vector<uint8_t> reply(ReplyLength(GetParam()), 0x5A);
+    ExpectSubmit(GetParam(), [&](auto cb) {
+        saved = cb;
+        cb(Async::AsyncStatus::kSuccess, reply);
+    });
+    EXPECT_EQ(Invoke(GetParam()), kIOReturnSuccess);
+    transport.reset();
+    registerIO.reset();
+    registry.reset();
+    saved(Async::AsyncStatus::kSuccess, reply);
+}
+
+TEST_P(SPro40D3TransportTests, EmptyHandleDetachesEvenIfNativeCallbackWasRetained) {
+    Async::InterfaceCompletionCallback saved;
+    ExpectSubmit(GetParam(), [&](auto cb) { saved = std::move(cb); }, {});
+    EXPECT_EQ(Invoke(GetParam()), kIOReturnError);
+    transport.reset();
+    registerIO.reset();
+    registry.reset();
+    const std::vector<uint8_t> reply(ReplyLength(GetParam()), 0x5A);
+    saved(Async::AsyncStatus::kSuccess, reply);
+}
+
 INSTANTIATE_TEST_SUITE_P(BusOperations, SPro40D3TransportTests,
                         ::testing::Values(Op::Read, Op::Write, Op::Cas));
+
+TEST_F(SPro40D3TransportTests, RouteFenceDoesNotHoldLockAcrossExternalCompletion) {
+    auto fence = std::make_shared<Protocols::Ports::ProtocolRegisterIO::CompletionRouteGuard>();
+    Async::InterfaceCompletionCallback saved;
+    ExpectSubmit(Op::Read, [&](auto cb) { saved = std::move(cb); });
+    std::latch entered{1};
+    std::latch release{1};
+    const auto submitted = registerIO->ReadBlock(
+        Async::FWAddress{Async::FWAddress::AddressParts{.addressHi = 0xFFFF, .addressLo = 0xE0400008}},
+        4, [&](auto status, auto payload) {
+            EXPECT_EQ(status, Async::AsyncStatus::kSuccess);
+            EXPECT_EQ(payload.size(), 4U);
+            fence->Close(); // reentry must not deadlock
+            entered.count_down();
+            release.wait();
+        }, std::nullopt, fence);
+    EXPECT_EQ(submitted.value, handle.value);
+    std::thread completion([&] { saved(Async::AsyncStatus::kSuccess, bytes); });
+    entered.wait();
+    // Close must return even though external completion is still blocked.
+    fence->Close();
+    transport.reset();
+    registerIO.reset();
+    registry.reset();
+    release.count_down();
+    completion.join();
+    saved(Async::AsyncStatus::kSuccess, bytes); // detached duplicate after destruction
+}
+
+TEST_F(SPro40D3TransportTests, ConcurrentDuplicateReadsPreserveFirstPublishedPayload) {
+    ExpectSubmit(Op::Read, [&](auto cb) {
+        cb(Async::AsyncStatus::kSuccess, bytes);
+        std::barrier start{3};
+        std::thread first([&] {
+            const std::array<uint8_t, 4> duplicate{1, 1, 1, 1};
+            start.arrive_and_wait();
+            cb(Async::AsyncStatus::kSuccess, duplicate);
+        });
+        std::thread second([&] {
+            const std::array<uint8_t, 4> duplicate{2, 2, 2, 2};
+            start.arrive_and_wait();
+            cb(Async::AsyncStatus::kSuccess, duplicate);
+        });
+        start.arrive_and_wait();
+        first.join();
+        second.join();
+    });
+    const auto result = transport->ReadBlock(address, 4);
+    ASSERT_TRUE(result);
+    EXPECT_EQ(*result, (std::vector<uint8_t>(bytes.begin(), bytes.end())));
+}
 
 TEST_F(SPro40D3TransportTests, ReadCopiesTransientPayloadAndRejectsShortReply) {
     ExpectSubmit(Op::Read, [](auto cb) {

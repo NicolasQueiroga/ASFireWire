@@ -375,6 +375,13 @@ std::optional<DeviceRouteToken> DeviceRegistry::CurrentRoute(Guid64 guid) const 
     return token;
 }
 
+uint64_t DeviceRegistry::RouteEpochHighWatermark() const noexcept {
+    IOLockLock(lock_);
+    const uint64_t epoch = nextRouteEpoch_;
+    IOLockUnlock(lock_);
+    return epoch;
+}
+
 bool DeviceRegistry::IsCurrent(const DeviceRouteToken& token) const noexcept {
     if (!token) {
         return false;

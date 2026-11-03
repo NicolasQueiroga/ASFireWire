@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define ASFW_DIAG_ABI_VERSION 12u
+#define ASFW_DIAG_ABI_VERSION 13u
 #define ASFW_DIAG_MAX_NODES 64u
 #define ASFW_DIAG_MAX_PORTS 27u
 #define ASFW_DIAG_MAX_SELF_ID_QUADS 256u
@@ -462,12 +462,25 @@ typedef struct ASFWDiagSPro40D3Mailbox {
     uint64_t rejectedNotifications;
     uint32_t vendorId;
     uint32_t modelId;
-    uint32_t nodeId;
+    uint32_t nodeId; // 0xFFFF when routeValid is zero; node zero is valid
     uint32_t sessionState;
     uint32_t activationState;
     uint32_t notificationState;
     uint32_t lastOperationStatus;
     uint32_t reserved0;
+    // ABI 13: cached runtime provenance only; header.generation is the bus
+    // generation. Zero session/owner fields mean unavailable, not ownership.
+    uint64_t sessionToken;
+    uint64_t runtimeGeneration;
+    uint64_t pendingOperations;
+    uint64_t cancelledOperations;
+    uint64_t timedOutOperations;
+    uint32_t identificationState; // 0 unavailable, 1 cached discovery, 2 stale cached discovery; not DCP identification
+    uint32_t reservationState;    // 0 absent, 1 reserved, 2 retired/tombstoned
+    uint32_t ownerProvenance;     // 0 unavailable; no live owner observation
+    uint32_t lastError;
+    uint32_t hardwareActivationDisabled;
+    uint32_t routeValid; // 0 unavailable/stale, 1 current cached registry route; not mailbox authorization
 } ASFWDiagSPro40D3Mailbox;
 
 #ifdef __cplusplus

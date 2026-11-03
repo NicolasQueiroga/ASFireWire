@@ -2,6 +2,7 @@
 
 #include "FireWireBusPort.hpp"
 #include "../../Async/Core/TransactionRetry.hpp"
+#include "../../Async/Core/LockPolicy.hpp"
 #include "../../Common/WireFormat.hpp"
 #include "../../Discovery/DeviceRegistry.hpp"
 
@@ -44,6 +45,36 @@ public:
     using BlockReadCallback = std::function<void(Async::AsyncStatus, std::span<const uint8_t>)>;
     using WriteCallback = std::function<void(Async::AsyncStatus)>;
     using CompareSwap64Callback = std::function<void(Async::AsyncStatus, uint64_t)>;
+
+    /// Opt-in, per-operation fence for callers that detach native completions.
+    /// Close synchronizes with the registry check, NOT with external completion:
+    /// no lock is held across callback invocation (which may reenter Close).
+    /// Registry must outlive submission and Close; after Close it may be destroyed.
+    /// This only detaches callbacks; it does not prove hardware cancellation.
+    class CompletionRouteGuard final {
+    public:
+        CompletionRouteGuard() : lock_(IOLockAlloc()) {}
+        ~CompletionRouteGuard() { if (lock_.IsValid()) IOLockFree(lock_.Raw()); }
+        CompletionRouteGuard(const CompletionRouteGuard&) = delete;
+        CompletionRouteGuard& operator=(const CompletionRouteGuard&) = delete;
+        [[nodiscard]] bool IsValid() const noexcept { return lock_.IsValid(); }
+        void Close() noexcept {
+            if (!IsValid()) return;
+            Async::ScopedLock guard(lock_);
+            closed_ = true;
+        }
+        [[nodiscard]] std::optional<bool> CheckRoute(
+            const Discovery::DeviceRegistry* registry,
+            const Discovery::DeviceRouteToken& route) noexcept {
+            if (!IsValid()) return std::nullopt;
+            Async::ScopedLock guard(lock_);
+            if (closed_) return std::nullopt;
+            return registry->IsCurrent(route);
+        }
+    private:
+        Async::IOLockWrapper lock_;
+        bool closed_{false};
+    };
 
     ProtocolRegisterIO(FireWireBusOps& busOps,
                        FireWireBusInfo& busInfo,
@@ -255,7 +286,8 @@ public:
         Async::FWAddress address,
         uint32_t length,
         BlockReadCallback callback,
-        std::optional<FW::FwSpeed> speedOverride = std::nullopt)
+        std::optional<FW::FwSpeed> speedOverride = std::nullopt,
+        std::shared_ptr<CompletionRouteGuard> completionGuard = {})
     {
         if (!IsRouteCurrent()) {
             callback(Async::AsyncStatus::kStaleGeneration, {});
@@ -268,12 +300,16 @@ public:
                                  address,
                                  length,
                                  ResolveSpeed(speedOverride),
-                                 [registry, route, callback = std::move(callback), length](Async::AsyncStatus status,
+                                 [registry, route, completionGuard = std::move(completionGuard), callback = std::move(callback), length](Async::AsyncStatus status,
                                                                               std::span<const uint8_t> payload) mutable {
                                      if (!callback) {
                                          return;
                                      }
-                                     if (!registry->IsCurrent(route)) {
+                                     const auto current = completionGuard
+                                         ? completionGuard->CheckRoute(registry, route)
+                                         : std::optional<bool>{registry->IsCurrent(route)};
+                                     if (!current) return;
+                                     if (!*current) {
                                          callback(Async::AsyncStatus::kStaleGeneration, {});
                                          return;
                                      }
@@ -310,7 +346,8 @@ public:
         Async::FWAddress address,
         std::span<const uint8_t> payload,
         BlockReadCallback callback,
-        std::optional<FW::FwSpeed> speedOverride = std::nullopt)
+        std::optional<FW::FwSpeed> speedOverride = std::nullopt,
+        std::shared_ptr<CompletionRouteGuard> completionGuard = {})
     {
         if (!IsRouteCurrent()) {
             callback(Async::AsyncStatus::kStaleGeneration, {});
@@ -323,14 +360,16 @@ public:
                                   address,
                                   payload,
                                   ResolveSpeed(speedOverride),
-                                  [registry, route, callback = std::move(callback)](Async::AsyncStatus status,
+                                  [registry, route, completionGuard = std::move(completionGuard),
+                                   callback = std::move(callback)](Async::AsyncStatus status,
                                                                        std::span<const uint8_t> response) mutable {
-                                      if (callback) {
-                                          callback(registry->IsCurrent(route)
-                                                       ? status
-                                                       : Async::AsyncStatus::kStaleGeneration,
-                                                   response);
-                                      }
+                                      if (!callback) return;
+                                      const auto current = completionGuard
+                                          ? completionGuard->CheckRoute(registry, route)
+                                          : std::optional<bool>{registry->IsCurrent(route)};
+                                      if (!current) return;
+                                      callback(*current ? status : Async::AsyncStatus::kStaleGeneration,
+                                               response);
                                   });
     }
 
@@ -370,7 +409,8 @@ public:
         uint64_t expected,
         uint64_t desired,
         BlockReadCallback callback,
-        std::optional<FW::FwSpeed> speedOverride = std::nullopt)
+        std::optional<FW::FwSpeed> speedOverride = std::nullopt,
+        std::shared_ptr<CompletionRouteGuard> completionGuard = {})
     {
         if (!IsRouteCurrent()) {
             callback(Async::AsyncStatus::kStaleGeneration, {});
@@ -392,11 +432,16 @@ public:
         return busOps_.Lock(route.generation, NodeId(), address, FW::LockOp::kCompareSwap,
                             std::span<const uint8_t>(operand->data(), operand->size()), 8,
                             ResolveSpeed(speedOverride),
-                            [operand, registry, route, callback = std::move(callback)](
+                            [operand, registry, route, completionGuard = std::move(completionGuard),
+                             callback = std::move(callback)](
                                 Async::AsyncStatus status, std::span<const uint8_t> payload) mutable {
                                 (void)operand;
                                 if (!callback) return;
-                                if (!registry->IsCurrent(route)) {
+                                const auto current = completionGuard
+                                    ? completionGuard->CheckRoute(registry, route)
+                                    : std::optional<bool>{registry->IsCurrent(route)};
+                                if (!current) return;
+                                if (!*current) {
                                     callback(Async::AsyncStatus::kStaleGeneration, {});
                                 } else {
                                     callback(status, payload);

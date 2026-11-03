@@ -82,6 +82,14 @@ struct ServiceContext {
     std::shared_ptr<ASFW::Common::TeardownCompletion> teardownCompletion{
         std::make_shared<ASFW::Common::TeardownCompletion>()};
 
+    using MailboxManager = ASFW::Audio::DICE::Focusrite::SPro40D3::SPro40D3DriverKitManager;
+    // A service-lifetime publication slot: diagnostics must not enter a raw
+    // ControllerCore which Reset may already have destroyed. Runtime Reset
+    // withdraws this slot before stopping the retained manager/dependencies.
+    [[nodiscard]] std::shared_ptr<MailboxManager> CopySPro40D3MailboxManager() const;
+    void SetSPro40D3MailboxManager(std::shared_ptr<MailboxManager> manager);
+    ~ServiceContext();
+
     void DisarmProviderNotifications();
 
     // Full tears everything down (driver free/Stop). ForSuspend (sleep and the
@@ -93,6 +101,10 @@ struct ServiceContext {
     // interrupt controller (observed 2026-07-10/11 on the FW643).
     enum class ResetMode { Full, ForSuspend };
     void Reset(ResetMode mode = ResetMode::Full);
+
+private:
+    mutable IOLock* mailboxManagerLock_{IOLockAlloc()};
+    std::shared_ptr<MailboxManager> mailboxManager_;
 };
 
 namespace ASFW::Driver {

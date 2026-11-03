@@ -29,7 +29,14 @@ namespace ASFW::Audio::DICE::Focusrite::SPro40D3 {
 /// and remove every caller before destroying it. Registry and clock outlive it.
 class SPro40D3NotificationHub final : public Async::ILocalAddressHandler {
 public:
+    // ALSA spro40d3.rs:258 reserves 16 address bytes. This does NOT prove that
+    // every device notification writes 16 bytes: its callback (:249-251) only
+    // accesses the first 12. Keep reservation and ingress policy distinct.
+    static constexpr size_t kAddressBytes = 16;
+    // Existing strict ingress policy, not a physically observed wire length.
+    // Do not broaden acceptance or synthesize a suffix without wire evidence.
     static constexpr size_t kFrameBytes = 16;
+    static_assert(kFrameBytes <= kAddressBytes);
     static constexpr size_t kQueueCapacity = 32;
 
     struct Region {

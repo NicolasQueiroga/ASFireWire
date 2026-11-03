@@ -66,6 +66,15 @@ static_assert(offsetof(ASFWDiagBusManager, powerAvailableMilliWatts) == 420, "po
 static_assert(offsetof(ASFWDiagBusManager, powerEligibleNodeCount) == 432, "powerEligibleNodeCount offset mismatch");
 static_assert(offsetof(ASFWDiagBusManager, topologyMapPublishStatus) == 524, "topologyMapPublishStatus offset mismatch");
 
+// ABI 13 appends runtime provenance without moving the ABI 12 prefix.
+static_assert(sizeof(ASFWDiagSPro40D3Mailbox) == 168, "mailbox ABI size mismatch");
+static_assert(offsetof(ASFWDiagSPro40D3Mailbox, guid) == 32);
+static_assert(offsetof(ASFWDiagSPro40D3Mailbox, lastOperationStatus) == 96);
+static_assert(offsetof(ASFWDiagSPro40D3Mailbox, sessionToken) == 104);
+static_assert(offsetof(ASFWDiagSPro40D3Mailbox, identificationState) == 144);
+static_assert(offsetof(ASFWDiagSPro40D3Mailbox, hardwareActivationDisabled) == 160);
+static_assert(offsetof(ASFWDiagSPro40D3Mailbox, routeValid) == 164);
+
 class DiagnosticsServiceTests : public ::testing::Test {
 protected:
     void SetUp() override {}
