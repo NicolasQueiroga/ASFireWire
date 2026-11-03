@@ -706,3 +706,29 @@ add_device_test(SPro40D3MailboxEngineTests
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxEngine.cpp"
 )
+
+# FW-203 Stage 2A: native async-port adapters and lifecycle, still host-only.
+# None of these targets registers a handler with a live controller.
+add_device_test(SPro40D3TransportTests
+    SPro40D3TransportTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3Transport.cpp"
+    "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"
+)
+target_link_libraries(SPro40D3TransportTests PRIVATE GTest::gmock)
+
+add_device_test(SPro40D3NotificationHubTests
+    SPro40D3NotificationHubTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3NotificationHub.cpp"
+    "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"
+)
+
+add_device_test(SPro40D3SessionTests
+    SPro40D3SessionTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3Session.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3Transport.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3NotificationHub.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxEngine.cpp"
+    "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"
+)
+target_link_libraries(SPro40D3SessionTests PRIVATE GTest::gmock)

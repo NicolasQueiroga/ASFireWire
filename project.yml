@@ -123,6 +123,9 @@ targets:
           - "Version/DriverVersion.hpp"
           - "Common/ActionTeardown.hpp"
           - "Common/TeardownCompletion.hpp"
+          # FW-203 Stages 1/2A are host-test-only. Recursive source discovery
+          # must not silently compile the unverified mailbox into the dext.
+          - "Audio/Protocols/DICE/Focusrite/SPro40D3*"
       - path: ASFWDriver/Common/ActionTeardown.hpp
       - path: ASFWDriver/Common/TeardownCompletion.hpp
     preBuildScripts:
