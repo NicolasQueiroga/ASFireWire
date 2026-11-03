@@ -36,6 +36,20 @@ public:
     using RemoteWriteCallback = std::function<void(uint64_t handle,
                                                    uint32_t offset,
                                                    std::span<const uint8_t> payload)>;
+
+    // Local-request provenance is retained through dispatch so consumers that
+    // share the dynamic software address space can validate the actual writer.
+    struct RemoteWriteContext {
+        uint64_t handle{0};
+        uint32_t offset{0};
+        uint64_t destination{0};
+        uint16_t sourceID{0};
+        uint32_t generation{0};
+        uint8_t tCode{0};
+        std::span<const uint8_t> payload{};
+    };
+    using RemoteWriteContextCallback =
+        std::function<Async::ResponseCode(const RemoteWriteContext& context)>;
     struct AddressRangeMeta {
         uint64_t handle{0};
         uint64_t address{0};
@@ -89,11 +103,15 @@ public:
                                            uint16_t addressHi,
                                            uint32_t length,
                                            uint64_t* outHandle,
-                                           AddressRangeMeta* outMeta = nullptr) {
+                                           AddressRangeMeta* outMeta = nullptr,
+                                           uint32_t alignment = kAutoAddressAlignment) {
         if (!lock_ || !outHandle || length == 0) {
             return kIOReturnBadArgument;
         }
-        if (addressHi != kAutoAddressHi) {
+        // Preserve the existing 8-byte default/minimum. Stricter consumers
+        // may request a power-of-two alignment without reserving padding.
+        if (addressHi != kAutoAddressHi || alignment < kAutoAddressAlignment ||
+            (alignment & (alignment - 1U)) != 0) {
             return kIOReturnBadArgument;
         }
 
@@ -126,7 +144,7 @@ public:
 
         std::sort(occupied.begin(), occupied.end());
 
-        uint64_t candidate = AlignUp(windowStart, kAutoAddressAlignment);
+        uint64_t candidate = AlignUp(windowStart, alignment);
         for (const auto& [rangeStart, rangeEnd] : occupied) {
             if (rangeEnd <= candidate) {
                 continue;
@@ -134,7 +152,7 @@ public:
             if (CanFitRange(candidate, length, rangeStart)) {
                 break;
             }
-            candidate = AlignUp(rangeEnd, kAutoAddressAlignment);
+            candidate = AlignUp(rangeEnd, alignment);
         }
 
         if (!CanFitRange(candidate, length, windowEndExclusive)) {
@@ -311,12 +329,16 @@ public:
     }
 
     Async::ResponseCode ApplyRemoteWrite(uint64_t address,
-                                         std::span<const uint8_t> payload) {
+                                         std::span<const uint8_t> payload,
+                                         uint16_t sourceID = 0,
+                                         uint32_t generation = 0,
+                                         uint8_t tCode = 0) {
         if (!lock_ || payload.empty()) {
             return Async::ResponseCode::AddressError;
         }
 
         RemoteWriteCallback callback;
+        RemoteWriteContextCallback contextCallback;
         uint64_t handle = 0;
         uint32_t offset = 0;
 
@@ -345,6 +367,7 @@ public:
                 range->hasBacking ? 1u : 0u);
             WriteBytesLocked(*range, offset, payload);
             callback = range->onRemoteWrite;
+            contextCallback = range->onRemoteWriteContext;
             handle = range->meta.handle;
             IOLockUnlock(lock_);
         }
@@ -352,6 +375,17 @@ public:
         // Fire callback outside lock to avoid deadlock.
         if (callback) {
             callback(handle, offset, payload);
+        }
+        if (contextCallback) {
+            return contextCallback(RemoteWriteContext{
+                .handle = handle,
+                .offset = offset,
+                .destination = address,
+                .sourceID = sourceID,
+                .generation = generation,
+                .tCode = tCode,
+                .payload = payload,
+            });
         }
 
         return Async::ResponseCode::Complete;
@@ -454,6 +488,21 @@ public:
         IOLockUnlock(lock_);
     }
 
+    // Like SetRemoteWriteCallback, but retains local-request provenance and
+    // permits the consumer to determine the response code.
+    void SetRemoteWriteContextCallback(uint64_t handle, RemoteWriteContextCallback callback) {
+        if (!lock_ || handle == 0) {
+            return;
+        }
+
+        IOLockLock(lock_);
+        auto it = ranges_.find(handle);
+        if (it != ranges_.end()) {
+            it->second.onRemoteWriteContext = std::move(callback);
+        }
+        IOLockUnlock(lock_);
+    }
+
     // Attach a human-readable label to a range for diagnostic logging only.
     // No-op if the handle is unknown. Truncated to fit the fixed buffer.
     void SetDebugLabel(uint64_t handle, const char* label) {
@@ -496,6 +545,7 @@ private:
         void* owner{nullptr};
         std::vector<uint8_t> buffer;
         RemoteWriteCallback onRemoteWrite;
+        RemoteWriteContextCallback onRemoteWriteContext;
         std::array<char, kDebugLabelCapacity> debugLabel{};
 
         OSSharedPtr<IOBufferMemoryDescriptor> descriptor{};

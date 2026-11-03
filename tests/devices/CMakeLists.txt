@@ -722,6 +722,22 @@ add_device_test(SPro40D3NotificationHubTests
     "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"
 )
 
+# FW-203 Stage 2B: manager-owned dynamic local notification address endpoint.
+add_device_test(SPro40D3NotificationEndpointTests
+    SPro40D3NotificationEndpointTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3NotificationEndpoint.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3NotificationHub.cpp"
+    "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"
+)
+
+add_device_test(SPro40D3DriverKitManagerTests
+    SPro40D3DriverKitManagerTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3DriverKitManager.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3NotificationEndpoint.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3NotificationHub.cpp"
+    "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"
+)
+
 add_device_test(SPro40D3SessionTests
     SPro40D3SessionTests.cpp
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3Session.cpp"

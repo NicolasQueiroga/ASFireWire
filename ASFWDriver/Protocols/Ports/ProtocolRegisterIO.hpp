@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 
@@ -261,17 +262,18 @@ public:
             return {};
         }
         const auto route = route_;
+        auto* registry = &routeRegistry_;
         return busOps_.ReadBlock(route.generation,
                                  NodeId(),
                                  address,
                                  length,
                                  ResolveSpeed(speedOverride),
-                                 [this, route, callback = std::move(callback), length](Async::AsyncStatus status,
-                                                                          std::span<const uint8_t> payload) mutable {
+                                 [registry, route, callback = std::move(callback), length](Async::AsyncStatus status,
+                                                                              std::span<const uint8_t> payload) mutable {
                                      if (!callback) {
                                          return;
                                      }
-                                     if (!routeRegistry_.IsCurrent(route)) {
+                                     if (!registry->IsCurrent(route)) {
                                          callback(Async::AsyncStatus::kStaleGeneration, {});
                                          return;
                                      }
@@ -293,24 +295,113 @@ public:
         WriteCallback callback,
         std::optional<FW::FwSpeed> speedOverride = std::nullopt)
     {
+        return WriteBlockWithResponse(
+            address, payload,
+            [callback = std::move(callback)](Async::AsyncStatus status,
+                                             std::span<const uint8_t>) mutable {
+                if (callback) callback(status);
+            },
+            speedOverride);
+    }
+
+    /// Variant for protocol adapters that must validate the complete write
+    /// response shape rather than accepting a status-only completion.
+    [[nodiscard]] Async::AsyncHandle WriteBlockWithResponse(
+        Async::FWAddress address,
+        std::span<const uint8_t> payload,
+        BlockReadCallback callback,
+        std::optional<FW::FwSpeed> speedOverride = std::nullopt)
+    {
         if (!IsRouteCurrent()) {
-            callback(Async::AsyncStatus::kStaleGeneration);
+            callback(Async::AsyncStatus::kStaleGeneration, {});
             return {};
         }
         const auto route = route_;
+        auto* registry = &routeRegistry_;
         return busOps_.WriteBlock(route.generation,
                                   NodeId(),
                                   address,
                                   payload,
                                   ResolveSpeed(speedOverride),
-                                  [this, route, callback = std::move(callback)](Async::AsyncStatus status,
-                                                                   std::span<const uint8_t>) mutable {
+                                  [registry, route, callback = std::move(callback)](Async::AsyncStatus status,
+                                                                       std::span<const uint8_t> response) mutable {
                                       if (callback) {
-                                          callback(routeRegistry_.IsCurrent(route)
+                                          callback(registry->IsCurrent(route)
                                                        ? status
-                                                       : Async::AsyncStatus::kStaleGeneration);
+                                                       : Async::AsyncStatus::kStaleGeneration,
+                                                   response);
                                       }
                                   });
+    }
+
+    // DICE DCP owner words are two big-endian quadlets in low-word-first
+    // order. This is deliberately distinct from CompareSwap64BE(): it is a
+    // protocol wire contract, not a generic 64-bit integer encoding.
+    [[nodiscard]] Async::AsyncHandle CompareSwap64DcpOwner(
+        Async::FWAddress address,
+        uint64_t expected,
+        uint64_t desired,
+        CompareSwap64Callback callback,
+        std::optional<FW::FwSpeed> speedOverride = std::nullopt)
+    {
+        return CompareSwap64DcpOwnerRaw(
+            address, expected, desired,
+            [callback = std::move(callback)](Async::AsyncStatus status,
+                                             std::span<const uint8_t> payload) mutable {
+                if (!callback) return;
+                if (status != Async::AsyncStatus::kSuccess) {
+                    callback(status, 0ULL);
+                } else if (payload.size() < 2 * sizeof(uint32_t)) {
+                    callback(Async::AsyncStatus::kShortRead, 0ULL);
+                } else {
+                    callback(Async::AsyncStatus::kSuccess,
+                             uint64_t{FW::ReadBE32(payload.data())} |
+                             (uint64_t{FW::ReadBE32(payload.data() + sizeof(uint32_t))} << 32));
+                }
+            },
+            speedOverride);
+    }
+
+    /// Raw DCP-owner completion for a transport that enforces an exact response
+    /// length. The owner encoding remains low BE32 then high BE32; no generic
+    /// BE64 compare-swap path is involved.
+    [[nodiscard]] Async::AsyncHandle CompareSwap64DcpOwnerRaw(
+        Async::FWAddress address,
+        uint64_t expected,
+        uint64_t desired,
+        BlockReadCallback callback,
+        std::optional<FW::FwSpeed> speedOverride = std::nullopt)
+    {
+        if (!IsRouteCurrent()) {
+            callback(Async::AsyncStatus::kStaleGeneration, {});
+            return {};
+        }
+        // Keep the request storage with the completion because cancellation may
+        // still permit a late callback, and some controller paths retain their
+        // submission span until that callback has unwound.
+        auto operand = std::make_shared<std::array<uint8_t, 16>>();
+        const auto writeOwner = [](uint8_t* destination, uint64_t value) {
+            FW::WriteBE32(destination, static_cast<uint32_t>(value));
+            FW::WriteBE32(destination + sizeof(uint32_t), static_cast<uint32_t>(value >> 32));
+        };
+        writeOwner(operand->data(), expected);
+        writeOwner(operand->data() + 2 * sizeof(uint32_t), desired);
+
+        const auto route = route_;
+        auto* registry = &routeRegistry_;
+        return busOps_.Lock(route.generation, NodeId(), address, FW::LockOp::kCompareSwap,
+                            std::span<const uint8_t>(operand->data(), operand->size()), 8,
+                            ResolveSpeed(speedOverride),
+                            [operand, registry, route, callback = std::move(callback)](
+                                Async::AsyncStatus status, std::span<const uint8_t> payload) mutable {
+                                (void)operand;
+                                if (!callback) return;
+                                if (!registry->IsCurrent(route)) {
+                                    callback(Async::AsyncStatus::kStaleGeneration, {});
+                                } else {
+                                    callback(status, payload);
+                                }
+                            });
     }
 
     [[nodiscard]] Async::AsyncHandle CompareSwap64BE(
@@ -329,6 +420,7 @@ public:
         FW::WriteBE64(operand.data() + 8, desired);
 
         const auto route = route_;
+        auto* registry = &routeRegistry_;
         return busOps_.Lock(route.generation,
                             NodeId(),
                             address,
@@ -336,12 +428,12 @@ public:
                             std::span<const uint8_t>(operand.data(), operand.size()),
                             8,
                             ResolveSpeed(speedOverride),
-                            [this, route, callback = std::move(callback)](Async::AsyncStatus status,
-                                                             std::span<const uint8_t> payload) mutable {
+                            [registry, route, callback = std::move(callback)](Async::AsyncStatus status,
+                                                                 std::span<const uint8_t> payload) mutable {
                                 if (!callback) {
                                     return;
                                 }
-                                if (!routeRegistry_.IsCurrent(route)) {
+                                if (!registry->IsCurrent(route)) {
                                     callback(Async::AsyncStatus::kStaleGeneration, 0ULL);
                                     return;
                                 }

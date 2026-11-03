@@ -3,11 +3,12 @@
 #include "SPro40D3Transport.hpp"
 
 #include "../../../../Common/WireFormat.hpp"
-#include "../../../../Protocols/Ports/ProtocolRegisterIO.hpp"
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <utility>
+#include <vector>
 
 namespace ASFW::Audio::DICE::Focusrite::SPro40D3 {
 namespace {
@@ -22,8 +23,9 @@ bool ValidRange(uint64_t address, size_t length) noexcept {
 }
 
 struct Pending {
-    // The bus invokes completion exactly once. Only that callback writes the
-    // result; the waiting thread reads it only after an acquire of done.
+    // The ProtocolRegisterIO completion and this control-queue caller share
+    // only this heap state. A late callback therefore never dereferences the
+    // transport (or a caller-provided span) after cancellation/destruction.
     std::atomic<bool> done{false};
     std::atomic<bool> abandoned{false};
     IOReturn status{kIOReturnError};
@@ -31,41 +33,41 @@ struct Pending {
     std::vector<uint8_t> request;
 };
 
-// DCP is low quadlet first, each quadlet big-endian, NOT a BE64 value.
-// Behavioral reference: snd-firewire-ctl-services, protocols/dice/src/
-// focusrite/spro40d3.rs:259-276 (16-byte compare/replacement, 8-byte lock).
-void EncodeOwner(uint8_t* bytes, uint64_t value) noexcept {
-    FW::WriteBE32(bytes, static_cast<uint32_t>(value));
-    FW::WriteBE32(bytes + 4, static_cast<uint32_t>(value >> 32));
+[[nodiscard]] Async::FWAddress ToAddress(uint64_t address) noexcept {
+    return Async::FWAddress{Async::FWAddress::AddressParts{
+        .addressHi = static_cast<uint16_t>(address >> 32),
+        .addressLo = static_cast<uint32_t>(address)}};
 }
 
 } // namespace
+
+SPro40D3Transport::SPro40D3Transport(Protocols::Ports::ProtocolRegisterIO& registerIO,
+                                     DiceWaitClock& clock, uint32_t timeoutMs)
+    : registerIO_(registerIO), clock_(clock), timeoutMs_(timeoutMs) {}
 
 SPro40D3Transport::SPro40D3Transport(Async::IFireWireBusOps& busOps,
                                      Async::IFireWireBusInfo& busInfo,
                                      Discovery::DeviceRegistry& registry,
                                      Discovery::DeviceRouteToken route,
                                      DiceWaitClock& clock, uint32_t timeoutMs)
-    : busOps_(busOps), busInfo_(busInfo), registry_(registry), route_(route),
-      clock_(clock), timeoutMs_(timeoutMs) {}
+    : ownedRegisterIO_(std::make_unique<Protocols::Ports::ProtocolRegisterIO>(
+          busOps, busInfo, registry, route))
+    , registerIO_(*ownedRegisterIO_)
+    , clock_(clock)
+    , timeoutMs_(timeoutMs) {}
 
 std::expected<std::vector<uint8_t>, IOReturn>
 SPro40D3Transport::Run(Operation operation, uint64_t address,
                        uint32_t responseLength, std::vector<uint8_t> request) {
-    if (!route_ || !registry_.IsCurrent(route_)) {
-        return std::unexpected(kIOReturnOffline);
-    }
-    const FW::NodeId node{static_cast<uint8_t>(route_.nodeId)};
-    const Async::FWAddress target{Async::FWAddress::AddressParts{
-        .addressHi = static_cast<uint16_t>(address >> 32),
-        .addressLo = static_cast<uint32_t>(address)}};
+    if (!registerIO_.IsRouteCurrent()) return std::unexpected(kIOReturnOffline);
+
+    const auto target = ToAddress(address);
     auto pending = std::make_shared<Pending>();
     pending->request = std::move(request);
-    auto completion = [pending, registry = &registry_, route = route_, responseLength](
-                          Async::AsyncStatus status, std::span<const uint8_t> payload) {
+    auto completion = [pending, responseLength](Async::AsyncStatus status,
+                                                std::span<const uint8_t> payload) {
         if (pending->abandoned.load(std::memory_order_acquire)) return;
-        IOReturn result = registry->IsCurrent(route)
-            ? Protocols::Ports::MapAsyncStatusToIOReturn(status) : kIOReturnOffline;
+        IOReturn result = Protocols::Ports::MapAsyncStatusToIOReturn(status);
         if (result == kIOReturnSuccess) {
             if (payload.size() < responseLength) {
                 result = kIOReturnUnderrun;
@@ -78,25 +80,30 @@ SPro40D3Transport::Run(Operation operation, uint64_t address,
         pending->status = result;
         pending->done.store(true, std::memory_order_release);
     };
-    const auto speed = busInfo_.GetSpeed(node);
-    // Recheck immediately before submission, after consulting bus policy.
-    if (!registry_.IsCurrent(route_)) return std::unexpected(kIOReturnOffline);
+
     const uint64_t startMs = clock_.NowMs();
     Async::AsyncHandle handle;
     switch (operation) {
     case Operation::Read:
-        handle = busOps_.ReadBlock(route_.generation, node, target, responseLength,
-                                   speed, std::move(completion));
+        handle = registerIO_.ReadBlock(target, responseLength, std::move(completion));
         break;
     case Operation::Write:
-        handle = busOps_.WriteBlock(route_.generation, node, target, pending->request,
-                                    speed, std::move(completion));
+        handle = registerIO_.WriteBlockWithResponse(target, pending->request,
+                                                    std::move(completion));
         break;
-    case Operation::CompareSwap:
-        handle = busOps_.Lock(route_.generation, node, target, FW::LockOp::kCompareSwap,
-                              pending->request, responseLength, speed, std::move(completion));
+    case Operation::CompareSwap: {
+        // The canonical DCP-owner API is intentionally used here rather than
+        // the generic BE64 CAS: the owner wire word is low BE32 then high BE32.
+        const uint64_t expected = uint64_t{FW::ReadBE32(pending->request.data())} |
+            (uint64_t{FW::ReadBE32(pending->request.data() + sizeof(uint32_t))} << 32);
+        const uint64_t desired = uint64_t{FW::ReadBE32(pending->request.data() + 2 * sizeof(uint32_t))} |
+            (uint64_t{FW::ReadBE32(pending->request.data() + 3 * sizeof(uint32_t))} << 32);
+        handle = registerIO_.CompareSwap64DcpOwnerRaw(target, expected, desired,
+                                                       std::move(completion));
         break;
     }
+    }
+
     // A synchronous completion may legitimately accompany an empty handle.
     // Otherwise an empty handle means submission failed; do not burn a deadline.
     if (!handle && !pending->done.load(std::memory_order_acquire)) {
@@ -104,14 +111,14 @@ SPro40D3Transport::Run(Operation operation, uint64_t address,
         return std::unexpected(kIOReturnError);
     }
     for (uint32_t attempt = 0; !pending->done.load(std::memory_order_acquire); ++attempt) {
-        if (!registry_.IsCurrent(route_)) {
+        if (!registerIO_.IsRouteCurrent()) {
             pending->abandoned.store(true, std::memory_order_release);
-            (void)busOps_.Cancel(handle);
+            (void)registerIO_.CancelTransaction(handle);
             return std::unexpected(kIOReturnOffline);
         }
         if (clock_.NowMs() - startMs >= timeoutMs_) {
             pending->abandoned.store(true, std::memory_order_release);
-            (void)busOps_.Cancel(handle);
+            (void)registerIO_.CancelTransaction(handle);
             return std::unexpected(kIOReturnTimeout);
         }
         clock_.Backoff(attempt);
@@ -140,12 +147,14 @@ SPro40D3Transport::CompareSwap64(uint64_t address, uint64_t expected, uint64_t d
         return std::unexpected(kIOReturnBadArgument);
     }
     std::vector<uint8_t> operands(16);
-    EncodeOwner(operands.data(), expected);
-    EncodeOwner(operands.data() + 8, desired);
+    FW::WriteBE32(operands.data(), static_cast<uint32_t>(expected));
+    FW::WriteBE32(operands.data() + sizeof(uint32_t), static_cast<uint32_t>(expected >> 32));
+    FW::WriteBE32(operands.data() + 2 * sizeof(uint32_t), static_cast<uint32_t>(desired));
+    FW::WriteBE32(operands.data() + 3 * sizeof(uint32_t), static_cast<uint32_t>(desired >> 32));
     auto result = Run(Operation::CompareSwap, address, 8, std::move(operands));
     if (!result) return std::unexpected(result.error());
     return uint64_t{FW::ReadBE32(result->data())} |
-           (uint64_t{FW::ReadBE32(result->data() + 4)} << 32);
+           (uint64_t{FW::ReadBE32(result->data() + sizeof(uint32_t))} << 32);
 }
 
 } // namespace ASFW::Audio::DICE::Focusrite::SPro40D3

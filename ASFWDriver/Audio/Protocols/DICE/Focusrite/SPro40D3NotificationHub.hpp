@@ -12,6 +12,7 @@
 #include <expected>
 #include <map>
 #include <optional>
+#include <set>
 
 namespace ASFW::Audio::DICE::Focusrite::SPro40D3 {
 
@@ -59,6 +60,12 @@ public:
     [[nodiscard]] std::expected<Lease, IOReturn>
     Allocate(Discovery::DeviceRouteToken route);
 
+    // Binds an address reserved by the process-wide local-request manager. This
+    // does not allocate transport memory and never makes a released address
+    // reusable; it only admits the exact address supplied by that manager.
+    [[nodiscard]] std::expected<Lease, IOReturn>
+    AllocateExternal(Discovery::DeviceRouteToken route, uint64_t address);
+
     // Linearizes against ingress and Take; clears pending frames, no bus IO.
     // A forged/stale lease cannot release a different allocation.
     void Release(const Lease& lease) noexcept;
@@ -82,6 +89,8 @@ private:
     };
 
     [[nodiscard]] static bool Matches(const Entry& entry, const Lease& lease) noexcept;
+    [[nodiscard]] std::expected<Lease, IOReturn>
+    AllocateLocked(Discovery::DeviceRouteToken route, uint64_t address) noexcept;
 
     Discovery::DeviceRegistry& registry_;
     DiceWaitClock& clock_;
@@ -93,6 +102,7 @@ private:
     // Only active leases consume storage. The bump cursor (not this map) keeps
     // all historical addresses permanently retired. No allocation on ingress.
     std::map<uint64_t, Entry> entries_;
+    std::set<uint64_t> retiredOffsets_;
 };
 
 } // namespace ASFW::Audio::DICE::Focusrite::SPro40D3

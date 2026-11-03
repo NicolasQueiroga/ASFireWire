@@ -1,5 +1,6 @@
 #pragma once
 
+#include <DriverKit/IOLib.h>
 #include <DriverKit/IOReturn.h>
 #include <functional>
 #include <memory>
@@ -81,6 +82,10 @@ namespace ASFW::Audio::DICE {
 class DiceNotificationRouter;
 } // namespace ASFW::Audio::DICE
 
+namespace ASFW::Audio::DICE::Focusrite::SPro40D3 {
+class SPro40D3DriverKitManager;
+} // namespace ASFW::Audio::DICE::Focusrite::SPro40D3
+
 namespace ASFW::Protocols::AVC {
 class AVCDiscovery;
 class IAVCDiscovery;
@@ -147,6 +152,10 @@ class ControllerCore final : private Role::IPhyConfigReset,
         // Attributes DICE notification writes to their device. Read by the
         // local request dispatch; the DICE protocols and backend register with it.
         std::shared_ptr<ASFW::Audio::DICE::DiceNotificationRouter> diceNotifications;
+        // Disabled-by-default TCD3070 mailbox composition. It owns no active
+        // mailbox session until an independently authorized future experiment.
+        std::shared_ptr<ASFW::Audio::DICE::Focusrite::SPro40D3::SPro40D3DriverKitManager>
+            sPro40D3MailboxManager;
 
         std::shared_ptr<ASFW::Protocols::AVC::AVCDiscovery> avcDiscovery;
         std::shared_ptr<ASFW::Protocols::AVC::FCPResponseRouter> fcpResponseRouter;
@@ -223,6 +232,12 @@ class ControllerCore final : private Role::IPhyConfigReset,
     /// this controller. `~ControllerCore` destroys `busImpl_` before `deps_`, so a
     /// registry destroyed as part of `deps_` would call through a dangling bus.
     void ReleaseAudioRuntimeRegistry() noexcept;
+
+    [[nodiscard]] std::shared_ptr<ASFW::Audio::DICE::Focusrite::SPro40D3::SPro40D3DriverKitManager>
+    CopySPro40D3MailboxManager() const;
+    void SetSPro40D3MailboxManager(
+        std::shared_ptr<ASFW::Audio::DICE::Focusrite::SPro40D3::SPro40D3DriverKitManager>
+            manager);
 
     Protocols::AVC::IAVCDiscovery* GetAVCDiscovery() const;
     void SetAVCDiscovery(std::shared_ptr<Protocols::AVC::AVCDiscovery> avcDiscovery);
@@ -362,6 +377,11 @@ class ControllerCore final : private Role::IPhyConfigReset,
     uint32_t busCycleTime_{0};
 
     std::unique_ptr<Async::FireWireBusImpl> busImpl_;
+    // Diagnostics may run concurrently with service teardown. Copy this under
+    // the manager lock before dereferencing the manager.
+    mutable IOLock* sPro40D3MailboxManagerLock_{nullptr};
+    std::shared_ptr<ASFW::Audio::DICE::Focusrite::SPro40D3::SPro40D3DriverKitManager>
+        sPro40D3MailboxManager_{};
     std::unique_ptr<Async::DMAMemoryImpl> dmaImpl_;
 
     // FW-6/FW-7: role / cycle-master policy. Fed from OnTopologyReady (topology)

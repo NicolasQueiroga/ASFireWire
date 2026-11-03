@@ -3,6 +3,7 @@
 #include "../../Audio/Core/AudioRuntimeRegistry.hpp"
 #include "../../Audio/Runtime/AudioTelemetrySnapshot.hpp"
 #include "../../Audio/Protocols/IDeviceProtocol.hpp"
+#include "../../Audio/Protocols/DICE/Focusrite/SPro40D3DriverKitManager.hpp"
 #include "../../Audio/Diagnostics/DICE/DiceLockSnapshot.hpp"
 #include "../../Audio/Diagnostics/DICE/DiceReceiverDumpSnapshot.hpp"
 #include "../../Diagnostics/DiagnosticsService.hpp"
@@ -295,6 +296,43 @@ kern_return_t DiagnosticsHandler::GetDiceReceiverDump(IOUserClientMethodArgument
     auto* output = OSData::withBytes(&snapshot, sizeof(snapshot));
     if (!output) return kIOReturnNoMemory;
     args->structureOutput = output;
+    args->structureOutputDescriptor = nullptr;
+    return kIOReturnSuccess;
+}
+
+kern_return_t DiagnosticsHandler::GetSPro40D3MailboxState(IOUserClientMethodArguments* args) {
+    if (!args || !driver_ || !args->structureInput) return kIOReturnBadArgument;
+    auto* input = StructInput(args);
+    if (!input || input->getLength() != sizeof(uint64_t)) return kIOReturnBadArgument;
+
+    uint64_t guid = 0;
+    std::memcpy(&guid, input->getBytesNoCopy(), sizeof(guid));
+    auto* controller = GetControllerCorePtr(driver_);
+    if (!controller) return kIOReturnNotReady;
+    auto manager = controller->CopySPro40D3MailboxManager();
+    if (!manager) return kIOReturnNotReady;
+
+    const auto cached = manager->CopyDiagnostics(guid);
+    ASFWDiagSPro40D3Mailbox output{};
+    Wire::PrimeDiagnosticsErrorHeader(output);
+    output.header.status = ASFWDiagStatusUnavailable;
+    output.header.generation = cached.generation;
+    output.guid = cached.guid;
+    output.notificationAddress = cached.notificationAddress;
+    output.observedForeignOwner = cached.foreignOwner;
+    output.acceptedNotifications = cached.acceptedNotifications;
+    output.rejectedNotifications = cached.rejectedNotifications;
+    output.vendorId = cached.vendorId;
+    output.modelId = cached.modelId;
+    output.nodeId = cached.nodeId;
+    output.sessionState = cached.sessionState;
+    output.activationState = cached.activationState;
+    output.notificationState = cached.notificationState;
+    output.lastOperationStatus = cached.lastOperationStatus;
+
+    auto* data = OSData::withBytes(&output, sizeof(output));
+    if (!data) return kIOReturnNoMemory;
+    args->structureOutput = data;
     args->structureOutputDescriptor = nullptr;
     return kIOReturnSuccess;
 }

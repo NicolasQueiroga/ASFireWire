@@ -123,9 +123,6 @@ targets:
           - "Version/DriverVersion.hpp"
           - "Common/ActionTeardown.hpp"
           - "Common/TeardownCompletion.hpp"
-          # FW-203 Stages 1/2A are host-test-only. Recursive source discovery
-          # must not silently compile the unverified mailbox into the dext.
-          - "Audio/Protocols/DICE/Focusrite/SPro40D3*"
       - path: ASFWDriver/Common/ActionTeardown.hpp
       - path: ASFWDriver/Common/TeardownCompletion.hpp
     preBuildScripts:
@@ -148,6 +145,9 @@ targets:
           - "$(inherited)"
           - "ASFW_AVC_MULTIRATE_VALIDATION=$(ASFW_AVC_MULTIRATE_VALIDATION)"
           - "ASFW_DICE_MULTIRATE_VALIDATION=$(ASFW_DICE_MULTIRATE_VALIDATION)"
+          # FW-203 Stage 2B compiles the guarded integration but does not
+          # permit live mailbox activation in either Debug or Release.
+          - "ASFW_SPRO40D3_EXPERIMENTAL_ACTIVATION=0"
         SDKROOT: driverkit
         DRIVERKIT_DEPLOYMENT_TARGET: "25.0"
         PRODUCT_NAME: net.asfw.driver

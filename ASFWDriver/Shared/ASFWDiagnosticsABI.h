@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define ASFW_DIAG_ABI_VERSION 11u
+#define ASFW_DIAG_ABI_VERSION 12u
 #define ASFW_DIAG_MAX_NODES 64u
 #define ASFW_DIAG_MAX_PORTS 27u
 #define ASFW_DIAG_MAX_SELF_ID_QUADS 256u
@@ -448,6 +448,27 @@ typedef struct ASFWDiagBusManager {
     // Former reserved[0]; keep at the tail to preserve existing field offsets.
     uint32_t cyclePolicyLocalClearCount;
 } ASFWDiagBusManager;
+
+// FW-203 Stage 2B: strictly cached TCD3070 mailbox-integration state. This
+// structure never implies that a DCP descriptor was read, an address was
+// registered with the device, or a mailbox command was submitted. A zero field
+// means unavailable/unobserved unless the state flags say otherwise.
+typedef struct ASFWDiagSPro40D3Mailbox {
+    ASFWDiagHeader header;
+    uint64_t guid;
+    uint64_t notificationAddress;
+    uint64_t observedForeignOwner;
+    uint64_t acceptedNotifications;
+    uint64_t rejectedNotifications;
+    uint32_t vendorId;
+    uint32_t modelId;
+    uint32_t nodeId;
+    uint32_t sessionState;
+    uint32_t activationState;
+    uint32_t notificationState;
+    uint32_t lastOperationStatus;
+    uint32_t reserved0;
+} ASFWDiagSPro40D3Mailbox;
 
 #ifdef __cplusplus
 }

@@ -424,6 +424,7 @@ constexpr uint64_t kMethodDiagGetLogCatalog       = 1014;
 constexpr uint64_t kMethodDiagGetDiceReceiverLock = 1015;
 constexpr uint64_t kMethodDiagRequestDiceReceiverDump = 1016;
 constexpr uint64_t kMethodDiagGetDiceReceiverDump = 1017;
+constexpr uint64_t kMethodDiagGetSPro40D3MailboxState = 1018;
 
 MethodDispatchResult DispatchDiagnosticsMethods(
     ASFW::UserClient::UserClientRuntimeState& runtimeState,
@@ -463,6 +464,8 @@ MethodDispatchResult DispatchDiagnosticsMethods(
         return runtimeState.Diagnostics().RequestDiceReceiverDump(arguments);
     case kMethodDiagGetDiceReceiverDump:
         return runtimeState.Diagnostics().GetDiceReceiverDump(arguments);
+    case kMethodDiagGetSPro40D3MailboxState:
+        return runtimeState.Diagnostics().GetSPro40D3MailboxState(arguments);
     case kMethodDiagGetLogCatalog:
         return runtimeState.Diagnostics().GetLogCatalog(arguments);
     default:

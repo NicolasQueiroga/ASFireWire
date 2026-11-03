@@ -368,6 +368,8 @@ ControllerCore::ControllerCore(ControllerConfig config, RolePolicy initialPolicy
           static_cast<Role::IRemoteCsrWriter*>(this),
           static_cast<Role::IContenderControl*>(this)}) {
 
+    sPro40D3MailboxManagerLock_ = IOLockAlloc();
+
     // FW-21: the RoleCoordinator's mutating actions are gated by the capability
     // ladder. Seed it from the initial role policy; ApplyRolePolicy() keeps the
     // gate in sync on any subsequent runtime change.
@@ -428,7 +430,14 @@ ControllerCore::ControllerCore(ControllerConfig config, RolePolicy initialPolicy
     // since DMAMemoryManager is created during AsyncSubsystem::Start()
 }
 
-ControllerCore::~ControllerCore() { Stop(); }
+ControllerCore::~ControllerCore() {
+    Stop();
+    SetSPro40D3MailboxManager({});
+    if (sPro40D3MailboxManagerLock_) {
+        IOLockFree(sPro40D3MailboxManagerLock_);
+        sPro40D3MailboxManagerLock_ = nullptr;
+    }
+}
 
 void ControllerCore::LogBuildBanner() const {
     ASFW_LOG(Controller, "═══════════════════════════════════════════════════════════");

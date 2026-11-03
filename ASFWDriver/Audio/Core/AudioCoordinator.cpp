@@ -76,6 +76,16 @@ void AudioCoordinator::SetCMPClient(ASFW::CMP::CMPClient* client) noexcept {
     runtime_.SetCMPClient(client);
 }
 
+void AudioCoordinator::SetSPro40D3RemovalCallback(
+    std::function<void(Discovery::Guid64)> callback) noexcept {
+    if (!lock_) {
+        return;
+    }
+    IOLockLock(lock_);
+    sPro40D3RemovalCallback_ = std::move(callback);
+    IOLockUnlock(lock_);
+}
+
 void AudioCoordinator::OnDeviceAdded(std::shared_ptr<Discovery::FWDevice> device) {
     if (!device) return;
     const uint64_t guid = device->GetGUID();
@@ -151,6 +161,16 @@ void AudioCoordinator::OnDeviceSuspended(std::shared_ptr<Discovery::FWDevice> de
 void AudioCoordinator::OnDeviceRemoved(Discovery::Guid64 guid) {
     if (guid == 0) {
         return;
+    }
+
+    std::function<void(Discovery::Guid64)> mailboxRemoval;
+    if (lock_) {
+        IOLockLock(lock_);
+        mailboxRemoval = sPro40D3RemovalCallback_;
+        IOLockUnlock(lock_);
+    }
+    if (mailboxRemoval) {
+        mailboxRemoval(guid);
     }
 
     bool wasActive = false;

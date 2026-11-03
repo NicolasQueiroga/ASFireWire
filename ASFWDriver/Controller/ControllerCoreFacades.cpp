@@ -8,6 +8,7 @@
 #include "../Async/DMAMemoryImpl.hpp"
 #include "../Async/FireWireBusImpl.hpp"
 #include "../Async/Interfaces/IAsyncControllerPort.hpp"
+#include "../Audio/Protocols/DICE/Focusrite/SPro40D3DriverKitManager.hpp"
 #include "../Bus/BusResetCoordinator.hpp"
 #include "../Bus/BusManager/BusManagerElectionDriver.hpp"
 #include "../Bus/CSR/CSRResponder.hpp"
@@ -86,6 +87,23 @@ Audio::AudioRuntimeRegistry* ControllerCore::GetAudioRuntimeRegistry() const {
 
 void ControllerCore::ReleaseAudioRuntimeRegistry() noexcept {
     deps_.audioRuntimeRegistry.reset();
+}
+
+std::shared_ptr<Audio::DICE::Focusrite::SPro40D3::SPro40D3DriverKitManager>
+ControllerCore::CopySPro40D3MailboxManager() const {
+    if (!sPro40D3MailboxManagerLock_) return {};
+    IOLockLock(sPro40D3MailboxManagerLock_);
+    auto manager = sPro40D3MailboxManager_;
+    IOLockUnlock(sPro40D3MailboxManagerLock_);
+    return manager;
+}
+
+void ControllerCore::SetSPro40D3MailboxManager(
+    std::shared_ptr<Audio::DICE::Focusrite::SPro40D3::SPro40D3DriverKitManager> manager) {
+    if (!sPro40D3MailboxManagerLock_) return;
+    IOLockLock(sPro40D3MailboxManagerLock_);
+    sPro40D3MailboxManager_ = std::move(manager);
+    IOLockUnlock(sPro40D3MailboxManagerLock_);
 }
 
 Protocols::AVC::IAVCDiscovery* ControllerCore::GetAVCDiscovery() const {

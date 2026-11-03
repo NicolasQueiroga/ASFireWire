@@ -76,6 +76,9 @@ public:
     // Selector 1017: the last DICE receiver dump; input is a GUID.
     kern_return_t GetDiceReceiverDump(IOUserClientMethodArguments* args);
 
+    // Selector 1018: cached, zero-I/O TCD3070 integration state; input is a GUID.
+    kern_return_t GetSPro40D3MailboxState(IOUserClientMethodArguments* args);
+
 private:
     ASFWDriver* driver_{nullptr};
     Diagnostics::DiagnosticsService* service_{nullptr};

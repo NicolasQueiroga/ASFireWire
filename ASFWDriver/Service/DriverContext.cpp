@@ -15,6 +15,7 @@
 #include "../Audio/Core/AudioCoordinator.hpp"
 #include "../Audio/Core/AudioRuntimeRegistry.hpp"
 #include "../Audio/Protocols/DICE/Core/DiceNotificationRouter.hpp"
+#include "../Audio/Protocols/DICE/Focusrite/SPro40D3DriverKitManager.hpp"
 #include "../Bus/BusManager.hpp"
 #include "../Bus/BusResetCoordinator.hpp"
 #include "../Bus/SelfIDCapture.hpp"
@@ -72,6 +73,19 @@ void ServiceContext::DisarmProviderNotifications() {
 
 void ServiceContext::Reset(ResetMode mode) {
     ASFW_LOG(Controller, "[Teardown] ServiceContext reset begin full=%d", mode == ResetMode::Full);
+    // Close the dormant TCD3070 control plane before its local-address manager,
+    // registry, dispatch, or bus dependencies can disappear. Stop is local
+    // only: it revokes ingress and never attempts an owner-release CAS.
+    if (controller) {
+        controller->SetSPro40D3MailboxManager(nullptr);
+    }
+    if (audioCoordinator) {
+        audioCoordinator->SetSPro40D3RemovalCallback({});
+    }
+    if (deps.sPro40D3MailboxManager) {
+        deps.sPro40D3MailboxManager->Stop();
+        deps.sPro40D3MailboxManager.reset();
+    }
     // Runtime stopping is owned by RuntimeLifecycleCoordinator. Reset only
     // releases resources after its quiesce executor has stopped them.
     if (mode == ResetMode::Full && sbp2NubPublisher) {
@@ -301,6 +315,9 @@ void DriverWiring::EnsureDeps(ASFWDriver* driver, ::ServiceContext& ctx) {
     }
 
     d.busResetStartedCallback = [&ctx] {
+        if (ctx.deps.sPro40D3MailboxManager) {
+            ctx.deps.sPro40D3MailboxManager->OnBusReset();
+        }
         if (ctx.audioCoordinator) ctx.audioCoordinator->HandleBusReset();
         ctx.dvCapture.HandleBusReset(ctx.isoch);
     };
@@ -331,6 +348,27 @@ kern_return_t DriverWiring::EnsureSbp2Deps(ASFWDriver& service, ::ServiceContext
 
     if (d.audioRuntimeRegistry && d.sbp2SessionScheduler) {
         d.audioRuntimeRegistry->SetTimerScheduler(d.sbp2SessionScheduler.get());
+    }
+
+    // Stage 2B composition is deliberately dormant. It reserves one unique,
+    // software-served notification address and a dedicated control queue but
+    // neither admits devices nor performs a remote transaction during startup.
+    if (!d.sPro40D3MailboxManager && d.deviceRegistry && d.sbp2AddressSpaceManager) {
+        d.sPro40D3MailboxManager =
+            std::make_shared<ASFW::Audio::DICE::Focusrite::SPro40D3::SPro40D3DriverKitManager>(
+                *d.deviceRegistry, *d.sbp2AddressSpaceManager);
+        if (ctx.controller) {
+            ctx.controller->SetSPro40D3MailboxManager(d.sPro40D3MailboxManager);
+        }
+        if (ctx.audioCoordinator) {
+            std::weak_ptr<ASFW::Audio::DICE::Focusrite::SPro40D3::SPro40D3DriverKitManager>
+                mailbox = d.sPro40D3MailboxManager;
+            ctx.audioCoordinator->SetSPro40D3RemovalCallback(
+                [mailbox = std::move(mailbox)](Discovery::Guid64 guid) {
+                    if (auto manager = mailbox.lock()) manager->OnDeviceRemoved(guid);
+                });
+        }
+        ASFW_LOG(DICE, "[SPro40D3] DriverKit mailbox integration staged; live activation disabled");
     }
     // Keeps the DICE restart quiet period.
     if (ctx.audioCoordinator && d.sbp2SessionScheduler) {

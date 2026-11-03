@@ -24,6 +24,7 @@
 #include <DriverKit/IOLib.h>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <unordered_map>
 
@@ -63,6 +64,10 @@ public:
     }
     // The bus's IRM client; the audio session reserves stream resources with it.
     void SetIRMClient(ASFW::IRM::IRMClient* client) noexcept { sessions_.SetIrmClient(client); }
+    // The service-owned TCD3070 control plane sees removal before this
+    // coordinator drops runtime protocol state. Keeping this as a callback
+    // avoids an AudioCoordinator-to-mailbox link dependency in host targets.
+    void SetSPro40D3RemovalCallback(std::function<void(Discovery::Guid64)> callback) noexcept;
 
     // IDeviceObserver
     void OnDeviceAdded(std::shared_ptr<Discovery::FWDevice> device) override;
@@ -119,6 +124,7 @@ private:
     IsochDuplexHostTransport hostTransport_;
     std::atomic_flag captureCommandBusy_ = ATOMIC_FLAG_INIT;
     std::atomic<Host::IAudioEndpointObserver*> endpointObserver_{nullptr};
+    std::function<void(Discovery::Guid64)> sPro40D3RemovalCallback_{};
     std::atomic<bool> teardownRequested_{false};
     Session::AudioSessions sessions_;
     // Every family runs on the host.

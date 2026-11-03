@@ -44,10 +44,11 @@ protected:
         (void)registry.UpsertFromROM(rom, Discovery::LinkPolicy{});
         route = *registry.CurrentRoute(rom.bib.guid);
         ON_CALL(bus, GetSpeed(FW::NodeId{7})).WillByDefault(Return(FW::FwSpeed::S400));
+        registerIO = std::make_unique<Protocols::Ports::ProtocolRegisterIO>(bus, bus, registry, route);
         transport = MakeTransport();
     }
     std::unique_ptr<D3::SPro40D3Transport> MakeTransport(uint32_t timeout = 5) {
-        return std::make_unique<D3::SPro40D3Transport>(bus, bus, registry, route, clock, timeout);
+        return std::make_unique<D3::SPro40D3Transport>(*registerIO, clock, timeout);
     }
     static constexpr uint64_t address = 0xFFFFE0400008ULL;
     static constexpr std::array<uint8_t, 4> bytes{0x12, 0x34, 0x56, 0x78};
@@ -116,6 +117,7 @@ protected:
     Discovery::DeviceRegistry registry;
     Discovery::DeviceRouteToken route;
     Clock clock;
+    std::unique_ptr<Protocols::Ports::ProtocolRegisterIO> registerIO;
     std::unique_ptr<D3::SPro40D3Transport> transport;
 };
 
@@ -360,7 +362,7 @@ TEST_F(SPro40D3TransportTests, MaximumBlockAndLastQuadletAreAccepted) {
 }
 
 TEST_F(SPro40D3TransportTests, DefaultTimeoutIs2000Milliseconds) {
-    transport = std::make_unique<D3::SPro40D3Transport>(bus, bus, registry, route, clock);
+    transport = std::make_unique<D3::SPro40D3Transport>(*registerIO, clock);
     ExpectSubmit(Op::Read, [](auto) {});
     EXPECT_CALL(bus, Cancel(_)).WillOnce(Return(true));
     EXPECT_EQ(Invoke(Op::Read), kIOReturnTimeout);

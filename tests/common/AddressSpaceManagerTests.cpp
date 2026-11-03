@@ -273,6 +273,54 @@ TEST(AddressSpaceManagerTests, AutoAllocationRejectsRequestLargerThanWindow) {
                                                nullptr));
 }
 
+TEST(AddressSpaceManagerTests, AutoAlignmentPreservesDefaultAndSkipsFixedCollisions) {
+    ASFW::Protocols::SBP2::AddressSpaceManager manager(nullptr);
+    using Meta = ASFW::Protocols::SBP2::AddressSpaceManager::AddressRangeMeta;
+    int owner = 0;
+    uint64_t handle = 0;
+    Meta meta{};
+    ASSERT_EQ(kIOReturnSuccess,
+              manager.AllocateAddressRangeAuto(&owner, 0xFFFF, 8, &handle, &meta));
+    EXPECT_EQ(meta.addressLo, 0x0010'0000u);
+    ASSERT_EQ(kIOReturnSuccess,
+              manager.AllocateAddressRange(&owner, 0xFFFF, 0x0010'0010, 8, &handle));
+    ASSERT_EQ(kIOReturnSuccess,
+              manager.AllocateAddressRangeAuto(&owner, 0xFFFF, 16, &handle, &meta, 16));
+    EXPECT_EQ(meta.addressLo, 0x0010'0020u);
+    // Alignment padding was not reserved; legacy first-fit still uses it.
+    ASSERT_EQ(kIOReturnSuccess,
+              manager.AllocateAddressRangeAuto(&owner, 0xFFFF, 8, &handle, &meta));
+    EXPECT_EQ(meta.addressLo, 0x0010'0008u);
+    ASSERT_EQ(kIOReturnSuccess,
+              manager.AllocateAddressRangeAuto(&owner, 0xFFFF, 8, &handle, &meta));
+    EXPECT_EQ(meta.addressLo, 0x0010'0018u);
+}
+
+TEST(AddressSpaceManagerTests, AutoAlignmentFailureLeavesOutputsAndAddressSpaceUnchanged) {
+    ASFW::Protocols::SBP2::AddressSpaceManager manager(nullptr);
+    int owner = 0;
+    uint64_t handle = 123;
+    ASFW::Protocols::SBP2::AddressSpaceManager::AddressRangeMeta meta{};
+    meta.address = 456;
+    for (const uint32_t alignment : {0U, 4U, 12U, 24U}) {
+        EXPECT_EQ(kIOReturnBadArgument,
+                  manager.AllocateAddressRangeAuto(&owner, 0xFFFF, 16, &handle, &meta, alignment));
+        EXPECT_EQ(handle, 123U);
+        EXPECT_EQ(meta.address, 456U);
+    }
+    // Rounding to the window end cannot fit even a small allocation.
+    for (const uint32_t alignment : {0x1000'0000U, 0x8000'0000U}) {
+        EXPECT_EQ(kIOReturnNoSpace,
+                  manager.AllocateAddressRangeAuto(&owner, 0xFFFF, 16, &handle, &meta, alignment));
+        EXPECT_EQ(handle, 123U);
+        EXPECT_EQ(meta.address, 456U);
+    }
+    ASSERT_EQ(kIOReturnSuccess,
+              manager.AllocateAddressRangeAuto(&owner, 0xFFFF, 8, &handle, &meta));
+    EXPECT_EQ(meta.addressLo, 0x0010'0000u);
+    EXPECT_EQ(handle, 1U); // Failed requests did not allocate a range/handle.
+}
+
 // SetDebugLabel is a diagnostics-only annotation; its contract is that it never
 // disturbs range state and silently tolerates unknown/zero handles and null
 // labels. Used by the SBP-2 session layer to tag login/status/ORB ranges.

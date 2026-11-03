@@ -7,6 +7,9 @@
 #include "../../../../Async/Interfaces/IFireWireBusInfo.hpp"
 #include "../../../../Async/Interfaces/IFireWireBusOps.hpp"
 #include "../../../../Discovery/DeviceRegistry.hpp"
+#include "../../../../Protocols/Ports/ProtocolRegisterIO.hpp"
+
+#include <memory>
 
 namespace ASFW::Audio::DICE::Focusrite::SPro40D3 {
 
@@ -21,6 +24,15 @@ public:
     static constexpr uint32_t kDefaultTimeoutMs = 2000;
     static constexpr uint32_t kMaxBlockBytes = 2048;
 
+    /// Canonical production entry point. All I/O, route validation, speed
+    /// selection, and cancellation go through ProtocolRegisterIO.
+    SPro40D3Transport(Protocols::Ports::ProtocolRegisterIO& registerIO,
+                     DiceWaitClock& clock = DriverKitWaitClock::Shared(),
+                     uint32_t timeoutMs = kDefaultTimeoutMs);
+
+    /// Compatibility bridge for the Stage 2A session. It owns the same
+    /// ProtocolRegisterIO used by the canonical constructor; no operation in
+    /// this adapter calls IFireWireBusOps directly.
     SPro40D3Transport(Async::IFireWireBusOps& busOps,
                      Async::IFireWireBusInfo& busInfo,
                      Discovery::DeviceRegistry& registry,
@@ -41,10 +53,8 @@ private:
     Run(Operation operation, uint64_t address, uint32_t responseLength,
         std::vector<uint8_t> request);
 
-    Async::IFireWireBusOps& busOps_;
-    Async::IFireWireBusInfo& busInfo_;
-    Discovery::DeviceRegistry& registry_;
-    const Discovery::DeviceRouteToken route_;
+    std::unique_ptr<Protocols::Ports::ProtocolRegisterIO> ownedRegisterIO_;
+    Protocols::Ports::ProtocolRegisterIO& registerIO_;
     DiceWaitClock& clock_;
     const uint32_t timeoutMs_;
 };

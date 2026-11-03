@@ -41,26 +41,50 @@ bool SPro40D3NotificationHub::Matches(const Entry& entry, const Lease& lease) no
 }
 
 std::expected<SPro40D3NotificationHub::Lease, IOReturn>
-SPro40D3NotificationHub::Allocate(Discovery::DeviceRouteToken route) {
-    if (!validRegion_) return std::unexpected(kIOReturnBadArgument);
-    if (!lock_) return std::unexpected(kIOReturnNoMemory);
-    const LockGuard guard(lock_);
+SPro40D3NotificationHub::AllocateLocked(Discovery::DeviceRouteToken route,
+                                         uint64_t address) noexcept {
     // Operational routes use physical node IDs; do not alias unexpected bus bits.
     if (route.nodeId > 0x3FU || !registry_.IsCurrent(route)) {
         return std::unexpected(kIOReturnNotReady);
     }
-    if (nextOffset_ >= region_.endExclusive ||
-        region_.endExclusive - nextOffset_ < kFrameBytes ||
-        nextId_ == std::numeric_limits<uint64_t>::max()) {
+    if (nextId_ == std::numeric_limits<uint64_t>::max() ||
+        entries_.contains(address) || retiredOffsets_.contains(address)) {
         return std::unexpected(kIOReturnNoSpace);
     }
-    const Lease lease{nextId_, nextOffset_, route};
-    auto [it, inserted] = entries_.try_emplace(lease.offset);
+    const Lease lease{nextId_, address, route};
+    auto [it, inserted] = entries_.try_emplace(address);
     if (!inserted) return std::unexpected(kIOReturnNoSpace);
     it->second.lease = lease;
     ++nextId_;
-    nextOffset_ += kFrameBytes; // Region validation makes this non-overflowing.
     return lease;
+}
+
+std::expected<SPro40D3NotificationHub::Lease, IOReturn>
+SPro40D3NotificationHub::Allocate(Discovery::DeviceRouteToken route) {
+    if (!validRegion_) return std::unexpected(kIOReturnBadArgument);
+    if (!lock_) return std::unexpected(kIOReturnNoMemory);
+    const LockGuard guard(lock_);
+    if (nextOffset_ >= region_.endExclusive ||
+        region_.endExclusive - nextOffset_ < kFrameBytes) {
+        return std::unexpected(kIOReturnNoSpace);
+    }
+    const auto lease = AllocateLocked(route, nextOffset_);
+    if (lease) {
+        nextOffset_ += kFrameBytes; // Region validation makes this non-overflowing.
+    }
+    return lease;
+}
+
+std::expected<SPro40D3NotificationHub::Lease, IOReturn>
+SPro40D3NotificationHub::AllocateExternal(Discovery::DeviceRouteToken route,
+                                           uint64_t address) {
+    if (!lock_) return std::unexpected(kIOReturnNoMemory);
+    if (address >= kAddressSpaceEnd || address % kFrameBytes != 0 ||
+        kAddressSpaceEnd - address < kFrameBytes) {
+        return std::unexpected(kIOReturnBadArgument);
+    }
+    const LockGuard guard(lock_);
+    return AllocateLocked(route, address);
 }
 
 void SPro40D3NotificationHub::Release(const Lease& lease) noexcept {
@@ -68,6 +92,7 @@ void SPro40D3NotificationHub::Release(const Lease& lease) noexcept {
     const LockGuard guard(lock_);
     const auto it = entries_.find(lease.offset);
     if (it != entries_.end() && Matches(it->second, lease)) {
+        retiredOffsets_.insert(lease.offset);
         entries_.erase(it); // Atomically retires ingress and all pending copies.
     }
 }
@@ -95,9 +120,17 @@ Async::LocalRequestResult SPro40D3NotificationHub::HandleLocalRequest(
     const Async::LocalRequestContext& ctx) {
     using Async::LocalRequestResult;
     using Async::ResponseCode;
-    if (!validRegion_ || ctx.destOffset < region_.begin ||
-        ctx.destOffset >= region_.endExclusive) {
-        return LocalRequestResult::NotMine();
+    const bool inOwnedRegion = ctx.destOffset >= region_.begin &&
+                               ctx.destOffset < region_.endExclusive;
+    if (!inOwnedRegion) {
+        // An externally bound address is outside the legacy test aperture, but
+        // is still owned by this hub while active or retired. Probe under lock
+        // before claiming it so unrelated dynamic ranges remain dispatchable.
+        if (!lock_) return LocalRequestResult::NotMine();
+        const LockGuard guard(lock_);
+        if (!entries_.contains(ctx.destOffset) && !retiredOffsets_.contains(ctx.destOffset)) {
+            return LocalRequestResult::NotMine();
+        }
     }
     // Capture ingress time, not control-queue consumption time. Never call the
     // injected clock (or any engine/session callback) while holding our lock.

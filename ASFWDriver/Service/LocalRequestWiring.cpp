@@ -251,7 +251,11 @@ public:
             if (ctx.writePayload.empty()) {
                 return LocalRequestResult::NotMine();
             }
-            const auto rc = mgr_->ApplyRemoteWrite(ctx.destOffset, ctx.writePayload);
+            const auto rc = mgr_->ApplyRemoteWrite(ctx.destOffset,
+                                                   ctx.writePayload,
+                                                   ctx.sourceID,
+                                                   ctx.generation,
+                                                   ctx.tCode);
             return rc == ResponseCode::AddressError ? LocalRequestResult::NotMine()
                                                     : LocalRequestResult::Write(rc);
         }
