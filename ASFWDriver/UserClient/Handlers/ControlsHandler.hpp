@@ -52,6 +52,12 @@ public:
     /// kIOReturnNotReady while the device has not answered.
     kern_return_t GetControlWriteResult(IOUserClientMethodArguments* args);
 
+    /// getMeterValues (84): the P10a envelope for the device's meter
+    /// telemetry. Input: [0..1] guid, [2] the current stream rate (Hz -
+    /// the rate selects the meter positions). Kicks the coalesced
+    /// refresh, then serves the cached batch; NEVER waits for the device.
+    kern_return_t GetMeterValues(IOUserClientMethodArguments* args);
+
 private:
     Protocols::AVC::IAVCDiscovery* discovery_{nullptr};
     Audio::Controls::ControlService::ProtocolLookup lookup_;

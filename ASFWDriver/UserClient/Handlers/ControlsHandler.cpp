@@ -5,10 +5,12 @@
 
 #include "ControlsHandler.hpp"
 #include "../../Audio/Controls/ControlService.hpp"
+#include "../../Audio/Protocols/IDeviceProtocol.hpp"
 #include "../../Audio/Controls/CoreAudioProjection.hpp"
 
 #include "../WireFormats/AVCDiscoveryDocument.hpp"
 #include "../WireFormats/ControlSnapshotDocument.hpp"
+#include "../WireFormats/MeterValuesWire.hpp"
 #include "../../Audio/Controls/AvcControlProjection.hpp"
 #include "../../Audio/Controls/AvcControlWrite.hpp"
 #include "../../Audio/Model/Topology/Validate.hpp"
@@ -101,6 +103,50 @@ kern_return_t ControlsHandler::GetControlSnapshot(IOUserClientMethodArguments* a
                                                    0,
                                                    static_cast<uint32_t>(args->scalarInput[2]), kMaxWireSize);
     OSData* data = OSData::withBytes(page.data(), static_cast<uint32_t>(page.size()));
+    if (!data) return kIOReturnNoMemory;
+    args->structureOutput = data;
+    args->structureOutputDescriptor = nullptr;
+    return kIOReturnSuccess;
+}
+
+kern_return_t ControlsHandler::GetMeterValues(IOUserClientMethodArguments* args) {
+    if (!discovery_) return kIOReturnNotReady;
+    if (!args || !args->scalarInput || args->scalarInputCount < 3) return kIOReturnBadArgument;
+    const uint64_t guid = GuidOf(args);
+    const uint32_t rateHz = static_cast<uint32_t>(args->scalarInput[2]);
+    const auto protocol = lookup_ ? lookup_(guid) : nullptr;
+    if (!protocol) return kIOReturnUnsupported;
+    auto* provider = protocol->Controls();
+    if (!provider) return kIOReturnUnsupported;
+
+    // The coalesced kick: the app owns the cadence (its 10 Hz, its
+    // stop-on-hidden policy); the provider refuses while foreground
+    // control work runs. The copy below NEVER waits for the device.
+    provider->RequestMeterRefresh(rateHz);
+    const auto batch = provider->CopyMeterTelemetry();
+
+    std::vector<Wire::MeterSample> samples;
+    uint32_t sequence = 0;
+    uint32_t generation = 0;
+    uint64_t timestampNs = 0;
+    if (batch) {
+        sequence = batch->sequence;
+        generation = batch->generation;
+        timestampNs = batch->timestampNs;
+        samples.reserve(batch->count);
+        for (size_t i = 0; i < batch->count; ++i) {
+            samples.push_back(Wire::MeterSample{
+                batch->raw[i],
+                batch->valid[i] ? Wire::kMeterValueValid : uint8_t{0}});
+        }
+    }
+    // No telemetry yet: the honest count-0 envelope ("nothing measured"),
+    // never a fabricated batch.
+    const auto envelope =
+        Wire::SerializeMeterValues(sequence, generation, timestampNs, samples);
+    if (envelope.empty()) return kIOReturnNoMemory;
+    OSData* data = OSData::withBytes(envelope.data(),
+                                     static_cast<uint32_t>(envelope.size()));
     if (!data) return kIOReturnNoMemory;
     args->structureOutput = data;
     args->structureOutputDescriptor = nullptr;

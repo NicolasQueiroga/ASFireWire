@@ -20,6 +20,11 @@ macro(add_protocols_mock_test TARGET_NAME)
 endmacro()
 
 # AVC Codec Tests (Core and Commands)
+# The P10a meter delivery contract: the versioned, size-bounded envelope.
+add_protocols_test(MeterValuesWireTests
+    MeterValuesWireTests.cpp
+)
+
 add_protocols_test(AvcCodecTests
     AvcCodecTests.cpp
     "${ASFW_DRIVER_DIR}/Protocols/AVC/Core/AvcFrame.cpp"

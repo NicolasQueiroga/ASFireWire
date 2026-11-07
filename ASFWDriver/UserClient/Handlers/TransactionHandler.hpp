@@ -40,6 +40,7 @@ public:
     kern_return_t AsyncBlockRead(IOUserClientMethodArguments* args,
                                  ASFWDriverUserClient* userClient);
 
+
     // Method 45: Initiate async block write transaction (forced block tCode)
     kern_return_t AsyncBlockWrite(IOUserClientMethodArguments* args,
                                   ASFWDriverUserClient* userClient);
