@@ -8,6 +8,8 @@
 
 #include "DICE/Avid/AvidMboxProRouting.hpp"
 #include "DICE/Focusrite/SPro24DspProtocol.hpp"
+#include "DICE/Focusrite/SPro40D3Protocol.hpp"
+#include <algorithm>
 #include "DICE/TCAT/DICETcatProtocol.hpp"
 #include "Oxford/Apogee/ApogeeDuetProtocol.hpp"
 #include "Fireworks/FireworksProtocol.hpp"
@@ -42,7 +44,8 @@ std::unique_ptr<IDeviceProtocol> CreateFamilyDeviceProtocol(
     CMP::CMPClient* cmpClient,
     Scheduling::ITimerScheduler* timerScheduler,
     DICE::DiceNotificationRouter* diceNotifications,
-    bool isS800
+    bool isS800,
+    Protocols::SBP2::AddressSpaceManager* spaceManager
 ) {
     if (!route) {
         return nullptr;
@@ -89,6 +92,24 @@ std::unique_ptr<IDeviceProtocol> CreateFamilyDeviceProtocol(
         // The plain TCAT devices differ in their profile, not their protocol:
         // geometry comes from the device's own registers either way.
         case ProtocolImplementationId::DiceTcat:
+            // The Saffire Pro 40 D3/TCD3070 is a TCAT device in every
+            // respect but its control surface: the exact revision (the
+            // GUID-discriminated catalog row) carries the native D3 mailbox
+            // protocol, with TCAT unchanged for streaming, clock and
+            // geometry. Gate on the catalog definition itself - never on
+            // GenericDice or a model name (plan P04; the Mbox Pro branch
+            // below is the same narrow special-case pattern).
+            if (std::find(plan.candidates.begin(), plan.candidates.end(),
+                          DeviceProfiles::Audio::DeviceDefinitionId::
+                              FocusriteSPro40Tcd3070) != plan.candidates.end()) {
+                ASFW_LOG(DICE,
+                         "Creating SPro40D3Protocol node=0x%04x unitOffset=%u",
+                         nodeId, plan.unit.unitDirectoryOffset);
+                return std::make_unique<DICE::Focusrite::SPro40D3::SPro40D3Protocol>(
+                    busOps, busInfo, routeRegistry, route, irmClient,
+                    DICE::DriverKitWaitClock::Shared(), diceNotifications,
+                    timerScheduler, spaceManager);
+            }
             // The Avid Mbox Pro is a generic TCAT device in every respect but
             // one: it powers up with no usable router program and passes
             // nothing to its analog stage until a host writes one, so it
