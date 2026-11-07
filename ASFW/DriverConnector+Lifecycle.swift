@@ -247,18 +247,8 @@ extension ASFWDriverConnector {
             }
 
             buffer.withUnsafeBytes { rawPtr in
-                let base = rawPtr.baseAddress!
-                let scalarCountOffset = MemoryLayout<mach_msg_header_t>.size + MemoryLayout<mach_msg_body_t>.size + MemoryLayout<mach_msg_port_descriptor_t>.size
-                let count = base.load(fromByteOffset: scalarCountOffset, as: UInt32.self).littleEndian
-                let scalarsOffset = scalarCountOffset + MemoryLayout<UInt32>.size
-                let messageBytes = Int(base.load(as: mach_msg_header_t.self).msgh_size)
-                guard count >= 2, count <= 16,
-                      scalarsOffset + Int(count) * MemoryLayout<UInt64>.size <= messageBytes,
-                      messageBytes <= rawPtr.count else { return }
-                // Packed Mach data is not guaranteed to align UInt64 values.
-                let scalars = (0..<Int(count)).map {
-                    base.loadUnaligned(fromByteOffset: scalarsOffset + $0 * 8, as: UInt64.self)
-                }
+                guard let scalars = ASFWDriverConnector.asyncCompletionScalars(
+                          base: rawPtr.baseAddress!, capacity: rawPtr.count) else { return }
                 if scalars[1] == ControlParameterChange.notificationReason {
                     if let change = ControlParameterChange(scalars: scalars) {
                         controlChangeSubject.send(change)
@@ -292,6 +282,40 @@ extension ASFWDriverConnector {
             self?.latestStatus = status
         }
         statusSubject.send(status)
+    }
+
+    /// Parses IOKit's async completion layout (OSMessageNotification.h).
+    /// The old parser assumed a `mach_msg_body_t` plus a port descriptor and
+    /// looked for a scalar count at byte 40; the layout IOKit actually
+    /// delivers is: the Mach header, `OSNotificationHeader64` (content size,
+    /// type 150, a 64-byte `OSAsyncReference64`), then
+    /// `IOAsyncCompletionContent` (an `IOReturn`, then the scalars). The
+    /// count is not sent; it follows from the content size. Reading a count
+    /// after a body and a port descriptor found 0 and dropped every
+    /// notification: status updates only arrived by polling, and control
+    /// changes never arrived.
+    /// Layout fix overlaps upstream PR #233 (open when applied here);
+    /// recorded in the local progress doc to avoid duplicate submission.
+    static func asyncCompletionScalars(base: UnsafeRawPointer, capacity: Int) -> [UInt64]? {
+        let headerOffset = MemoryLayout<mach_msg_header_t>.size
+        guard headerOffset + 2 * MemoryLayout<UInt32>.size <= capacity else { return nil }
+        let contentOffset = headerOffset + 2 * MemoryLayout<UInt32>.size
+            + MemoryLayout<OSAsyncReference64>.size
+        let scalarsOffset = contentOffset + MemoryLayout<IOReturn>.size
+        guard scalarsOffset <= capacity else { return nil }
+        let messageBytes = Int(base.load(as: mach_msg_header_t.self).msgh_size)
+        guard messageBytes <= capacity, scalarsOffset <= messageBytes else { return nil }
+        let contentSize = Int(base.loadUnaligned(fromByteOffset: headerOffset, as: UInt32.self))
+        let type = base.loadUnaligned(fromByteOffset: headerOffset + 4, as: UInt32.self)
+        let count = (contentSize - MemoryLayout<IOReturn>.size) / MemoryLayout<UInt64>.size
+        guard type & UInt32(kIOKitNoticationTypeMask)
+                  == UInt32(kIOAsyncCompletionNotificationType),
+              contentSize >= MemoryLayout<IOReturn>.size, count >= 2, count <= 16,
+              scalarsOffset + count * MemoryLayout<UInt64>.size <= messageBytes else { return nil }
+        // Packed Mach data is not guaranteed to align UInt64 values.
+        return (0..<count).map {
+            base.loadUnaligned(fromByteOffset: scalarsOffset + $0 * 8, as: UInt64.self)
+        }
     }
 
     private func startMonitoringLocked() {

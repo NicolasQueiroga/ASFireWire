@@ -71,6 +71,8 @@ final class ASFWDriverConnector: ObservableObject {
         case setControlParameter = 81
         case getControlWriteResult = 82
         case setControlRoute = 83
+        // The P10a meter envelope: bounded, versioned, cache-copy only.
+        case getMeterValues = 84
         // Read-only audio telemetry diagnostics.
         case getAudioTelemetry = 1013
         // Driver-owned LogRing category names and named filter presets.
