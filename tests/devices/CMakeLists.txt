@@ -689,3 +689,29 @@ add_device_test(OrpheusProtocolTests
     "${ASFW_DRIVER_DIR}/Protocols/AVC/FCPTransport.cpp"
 )
 
+
+# SPro40D3 (TCD3070) DCP mailbox core: imported, host-tested codecs/engine and
+# simulator (selective reuse from fw203-stage2c-runtime @a58844c4) plus the
+# ambiguous-write regression converted from validation/fw203-ambiguous-write.cpp.
+add_device_test(SPro40D3MailboxCodecTests
+    SPro40D3MailboxCodecTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
+)
+
+add_device_test(SPro40D3MailboxEngineTests
+    SPro40D3MailboxEngineTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxEngine.cpp"
+)
+
+add_device_test(SPro40D3AmbiguousWriteTests
+    SPro40D3AmbiguousWriteTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxEngine.cpp"
+)
+
+add_device_test(SPro40D3AsyncEngineTests
+    SPro40D3AsyncEngineTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxEngine.cpp"
+)
