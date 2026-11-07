@@ -47,6 +47,10 @@ namespace ASFW::Audio::DICE {
 class DiceNotificationRouter;
 } // namespace ASFW::Audio::DICE
 
+namespace ASFW::Protocols::SBP2 {
+class AddressSpaceManager;
+}
+
 namespace ASFW::Audio {
 
 class IDeviceProtocol;
@@ -83,6 +87,12 @@ public:
     void SetTimerScheduler(Scheduling::ITimerScheduler* timerScheduler) noexcept {
         timerScheduler_ = timerScheduler;
     }
+    // The SHARED address-space manager: collision-safe notification-range
+    // reservation for the D3 mailbox endpoint. Set once during wiring,
+    // before discovery creates D3 protocols; the registry does not own it.
+    void SetAddressSpaceManager(Protocols::SBP2::AddressSpaceManager* manager) noexcept {
+        spaceManager_ = manager;
+    }
 
     // Create-on-demand for a known device. Idempotent: an existing instance is
     // returned without re-creating (covers re-scan on device resume). Mirrors the
@@ -111,6 +121,7 @@ private:
     std::unordered_map<uint64_t, std::shared_ptr<AudioEndpointRuntime>> endpointsByGuid_;
     CMP::CMPClient* cmpClient_{nullptr};
     Scheduling::ITimerScheduler* timerScheduler_{nullptr};
+    Protocols::SBP2::AddressSpaceManager* spaceManager_{nullptr};
     DICE::DiceNotificationRouter* diceNotifications_{nullptr};
 };
 

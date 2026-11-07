@@ -32,6 +32,10 @@ namespace ASFW::Audio::DICE {
 class DiceNotificationRouter;
 }
 
+namespace ASFW::Protocols::SBP2 {
+class AddressSpaceManager;
+}
+
 namespace ASFW::Audio {
 
 /// Constructs a device-specific protocol handler from an already resolved
@@ -46,7 +50,8 @@ namespace ASFW::Audio {
     ::ASFW::CMP::CMPClient* cmpClient = nullptr,
     Scheduling::ITimerScheduler* timerScheduler = nullptr,
     DICE::DiceNotificationRouter* diceNotifications = nullptr,
-    bool isS800 = false
+    bool isS800 = false,
+    Protocols::SBP2::AddressSpaceManager* spaceManager = nullptr
 );
 
 } // namespace ASFW::Audio

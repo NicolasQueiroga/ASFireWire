@@ -91,9 +91,31 @@ std::expected<void, StateError> validateMeterValue(
     MeterId id,
     double value);
 
+/// Completeness requirements for validateState. The default is the strict
+/// original behavior: every non-Action parameter, every router and every
+/// meter must have state. A device whose protocol cannot read everything
+/// back (a write-only mixer/router surface with no readback) opts into
+/// validating every PRESENT entry strictly while permitting missing
+/// observations - absence is then the honest representation of unknown
+/// value, never an error, and never permission for a present entry to be
+/// malformed. State that names something the topology does not is still
+/// rejected under every policy (plan §4: one narrow explicit policy, not a
+/// weakened validator).
+struct StateCompletenessPolicy {
+    bool requireCompleteParameterState{true};
+    bool requireCompleteRouterState{true};
+    bool requireCompleteMeterState{true};
+
+    [[nodiscard]] constexpr bool strict() const noexcept {
+        return requireCompleteParameterState && requireCompleteRouterState &&
+               requireCompleteMeterState;
+    }
+};
+
 // Complete device state snapshot validation
 std::expected<void, StateError> validateState(
     const Topology& topology,
-    const DeviceState& state);
+    const DeviceState& state,
+    StateCompletenessPolicy policy = {});
 
 } // namespace ASFW::AudioModel

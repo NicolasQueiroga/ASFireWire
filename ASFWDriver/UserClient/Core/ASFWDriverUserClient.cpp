@@ -87,6 +87,8 @@ enum {
     kMethodSetControlParameter = 81,
     kMethodGetControlWriteResult = 82,
     kMethodSetControlRoute = 83,
+    // The P10a meter envelope: bounded, versioned, cache-copy only.
+    kMethodGetMeterValues = 84,
     // TODO(ASFW-IRM): Remove temporary IRM test method after dedicated validation tooling exists.
     kMethodTestIRMAllocation = 26,
     kMethodTestIRMRelease = 27,
@@ -231,6 +233,8 @@ MethodDispatchResult DispatchAVCMethods(ASFW::UserClient::UserClientRuntimeState
         return runtimeState.AVC().GetAVCDiscoveryDocument(arguments);
     case kMethodGetControlSnapshot:
         return runtimeState.Controls().GetControlSnapshot(arguments);
+    case kMethodGetMeterValues:
+        return runtimeState.Controls().GetMeterValues(arguments);
     case kMethodSetControlParameter:
         return runtimeState.Controls().SetControlParameter(arguments);
     case kMethodSetControlRoute:

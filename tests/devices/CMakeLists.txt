@@ -689,3 +689,62 @@ add_device_test(OrpheusProtocolTests
     "${ASFW_DRIVER_DIR}/Protocols/AVC/FCPTransport.cpp"
 )
 
+
+# SPro40D3 (TCD3070) DCP mailbox core: imported, host-tested codecs/engine and
+# simulator (selective reuse from fw203-stage2c-runtime @a58844c4) plus the
+# ambiguous-write regression converted from validation/fw203-ambiguous-write.cpp.
+add_device_test(SPro40D3MailboxCodecTests
+    SPro40D3MailboxCodecTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
+)
+
+add_device_test(SPro40D3MailboxEngineTests
+    SPro40D3MailboxEngineTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxEngine.cpp"
+)
+
+add_device_test(SPro40D3AmbiguousWriteTests
+    SPro40D3AmbiguousWriteTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxEngine.cpp"
+)
+
+add_device_test(SPro40D3AsyncEngineTests
+    SPro40D3AsyncEngineTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxEngine.cpp"
+)
+
+add_device_test(SPro40D3EndpointTests
+    SPro40D3EndpointTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxEngine.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3NotificationEndpoint.cpp"
+)
+
+add_device_test(SPro40D3TransportPortTests
+    SPro40D3TransportPortTests.cpp
+    "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3TransportPort.cpp"
+)
+
+add_device_test(SPro40D3ProtocolTests
+    SPro40D3ProtocolTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3Protocol.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxTypes.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3MailboxEngine.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3NotificationEndpoint.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro40D3TransportPort.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/TCAT/DICETcatProtocol.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICETransaction.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DiceDeviceIo.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DiceNotificationRouter.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DiceFamilyDriver.cpp"
+    "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"
+    "${ASFW_DRIVER_DIR}/Protocols/SBP2/AddressSpaceManager.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Model/Topology/Validate.cpp"
+    "${ASFW_DRIVER_DIR}/UserClient/WireFormats/ControlSnapshotDocument.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Controls/CoreAudioProjection.cpp"
+)
