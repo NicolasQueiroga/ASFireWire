@@ -10,6 +10,7 @@ protocol DeviceControlsSource: AnyObject {
     func getAVCUnits() -> [AVCUnitInfo]?
     func getDiscoveredDevices() -> [FWDeviceInfo]?
     func getControlSnapshot(guid: UInt64) -> Result<Data, ControlsDriverError>
+    func getMeterValues(guid: UInt64) -> Result<Data, ControlsDriverError>
     func setControlParameter(guid: UInt64, revision: UInt64, parameterId: UInt32,
                              value: ControlValue) -> Result<UInt64, ControlsDriverError>
     func setControlRoute(guid: UInt64, revision: UInt64, routerId: UInt32,
@@ -20,6 +21,11 @@ protocol DeviceControlsSource: AnyObject {
 extension DeviceControlsSource {
     func setControlRoute(guid: UInt64, revision: UInt64, routerId: UInt32,
                          output: UInt32, input: UInt32?) -> Result<UInt64, ControlsDriverError> {
+        .failure(.driver(kIOReturnUnsupported))
+    }
+    /// The P10b meter fetch's default: unsupported until a source knows
+    /// the telemetry (the real connector overrides; test fakes inherit).
+    func getMeterValues(guid: UInt64) -> Result<Data, ControlsDriverError> {
         .failure(.driver(kIOReturnUnsupported))
     }
 }
@@ -95,6 +101,17 @@ final class DeviceControlsViewModel: ObservableObject {
     var selectedDevice: Device? { devices.first { $0.guid == selectedGUID } }
 
     func writeState(_ parameterId: UInt32) -> WriteState { writeStates[parameterId] ?? .idle }
+
+    /// The P10b meter envelope pass-through (the console's poller fetch).
+    func getMeterValues(guid: UInt64) -> Result<Data, ControlsDriverError> {
+        source.getMeterValues(guid: guid)
+    }
+
+    /// The receiver-lock telemetry (the console's status line).
+    func getMeterLock(guid: UInt64) -> DiceReceiverLock? {
+        (source as? ASFWDriverConnector)?.getDiceReceiverLock(guid: guid)
+    }
+
 
     // MARK: Loading
 

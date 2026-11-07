@@ -149,6 +149,7 @@ struct ControlConsoleMixerStrip: View {
     let snapshot: ControlSnapshot
     @ObservedObject var model: DeviceControlsViewModel
     let metrics: ControlConsoleMetrics
+    var meterSample: MeterValuesBatch.Sample?
 
     var body: some View {
         AudioConsoleStripShell(title: source.title.uppercased(), tint: .purple,
@@ -160,6 +161,8 @@ struct ControlConsoleMixerStrip: View {
                     .foregroundStyle(.secondary)
             } faderBlock: {
                 HStack(alignment: .bottom, spacing: 4) {
+                    ConsoleMeterBar(sample: meterSample, tint: .purple)
+                        .frame(height: ControlConsoleMetrics.faderBlockHeight - 16)
                     ForEach(source.sends) { send in
                         if let parameter = snapshot.parameters.first(where: { $0.id == send.parameter }) {
                             ControlConsoleFader(parameter: parameter, state: model.writeState(parameter.id),

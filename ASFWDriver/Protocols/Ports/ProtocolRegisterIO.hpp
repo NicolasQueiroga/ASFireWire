@@ -276,7 +276,14 @@ public:
                                          return;
                                      }
                                      if (status != Async::AsyncStatus::kSuccess) {
-                                         callback(status, {});
+                                         // A short read still carries its
+                                         // (short) payload: honest passthrough
+                                         // for callers with their own shape
+                                         // rules. Other statuses carry none.
+                                         callback(status,
+                                                  status == Async::AsyncStatus::kShortRead
+                                                      ? payload
+                                                      : std::span<const uint8_t>{});
                                          return;
                                      }
                                      if (payload.size() < length) {
@@ -311,6 +318,61 @@ public:
                                                        : Async::AsyncStatus::kStaleGeneration);
                                       }
                                   });
+    }
+
+    // Generic raw compare-swap: the CALLER owns the operand byte layout and
+    // the old-value decoding. Some device families store 64-bit fields in a
+    // family-specific word order the generic BE64 encoding cannot express;
+    // those adapters build their own 16-byte operand (compare||new) here
+    // and decode the response payload themselves, instead of a
+    // vendor-named helper entering this shared port. Route-current is
+    // still checked at issue and at completion (stale generation), exactly
+    // like every other operation. `operand` must be 2 * dataLength bytes
+    // and `dataLength` <= 8 (the bus Lock data width).
+    using RawLockCallback = std::function<void(Async::AsyncStatus, std::span<const uint8_t>)>;
+
+    [[nodiscard]] Async::AsyncHandle LockCompareSwapRaw(
+        Async::FWAddress address,
+        std::span<const uint8_t> operand,
+        uint32_t dataLength,
+        RawLockCallback callback,
+        std::optional<FW::FwSpeed> speedOverride = std::nullopt)
+    {
+        if (operand.size() != 2 * size_t{dataLength} || dataLength == 0 || dataLength > 8) {
+            callback(Async::AsyncStatus::kHardwareError, {});
+            return {};
+        }
+        if (!IsRouteCurrent()) {
+            callback(Async::AsyncStatus::kStaleGeneration, {});
+            return {};
+        }
+        const auto route = route_;
+        return busOps_.Lock(route.generation,
+                            NodeId(),
+                            address,
+                            FW::LockOp::kCompareSwap,
+                            operand,
+                            dataLength,
+                            ResolveSpeed(speedOverride),
+                            [this, route, callback = std::move(callback), dataLength](Async::AsyncStatus status,
+                                                                          std::span<const uint8_t> payload) mutable {
+                                if (!callback) {
+                                    return;
+                                }
+                                if (!routeRegistry_.IsCurrent(route)) {
+                                    callback(Async::AsyncStatus::kStaleGeneration, {});
+                                    return;
+                                }
+                                if (status != Async::AsyncStatus::kSuccess) {
+                                    callback(status, {});
+                                    return;
+                                }
+                                if (payload.size() < dataLength) {
+                                    callback(Async::AsyncStatus::kShortRead, payload);
+                                    return;
+                                }
+                                callback(Async::AsyncStatus::kSuccess, payload);
+                            });
     }
 
     [[nodiscard]] Async::AsyncHandle CompareSwap64BE(
@@ -384,6 +446,12 @@ public:
     }
 
     [[nodiscard]] Discovery::DeviceRouteToken Route() const noexcept { return route_; }
+
+    /// Local node id from the live bus info (used by vendor owner
+    /// encodings that address the claimer, e.g. DICE notification owners).
+    [[nodiscard]] FW::NodeId LocalNode() const noexcept {
+        return busInfo_.GetLocalNodeID();
+    }
 
     [[nodiscard]] bool IsRouteCurrent() const noexcept {
         return static_cast<bool>(route_) && routeRegistry_.IsCurrent(route_);

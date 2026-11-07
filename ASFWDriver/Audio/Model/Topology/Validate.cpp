@@ -964,7 +964,8 @@ std::expected<void, StateError> validateMeterValue(
 // Complete device state snapshot validation
 std::expected<void, StateError> validateState(
     const Topology& topology,
-    const DeviceState& state) {
+    const DeviceState& state,
+    StateCompletenessPolicy policy) {
 
     // 1. Check revision match
     if (state.topologyRevision != topology.revision) {
@@ -982,10 +983,15 @@ std::expected<void, StateError> validateState(
         auto it = state.parameters.find(param.id);
         if (it == state.parameters.end()) {
             if (std::holds_alternative<ActionDomain>(param.domain)) continue;
-            return std::unexpected(StateError{
-                StateErrorKind::MissingParameter,
-                detail::Format("DeviceState is missing required ParameterId {} '{}'", param.id.value, param.name)
-            });
+            // Missing observations are permitted only under an explicit
+            // opt-in; present entries are always validated below.
+            if (policy.requireCompleteParameterState) {
+                return std::unexpected(StateError{
+                    StateErrorKind::MissingParameter,
+                    detail::Format("DeviceState is missing required ParameterId {} '{}'", param.id.value, param.name)
+                });
+            }
+            continue;
         }
         if (auto res = validateParameterState(param, it->second); !res) {
             return res;
@@ -1007,10 +1013,13 @@ std::expected<void, StateError> validateState(
             topoRouters.insert(node.id);
             auto it = state.routers.find(node.id);
             if (it == state.routers.end()) {
-                return std::unexpected(StateError{
-                    StateErrorKind::MissingRouter,
-                    detail::Format("DeviceState is missing required Router NodeId {} '{}'", node.id.value, node.name)
-                });
+                if (policy.requireCompleteRouterState) {
+                    return std::unexpected(StateError{
+                        StateErrorKind::MissingRouter,
+                        detail::Format("DeviceState is missing required Router NodeId {} '{}'", node.id.value, node.name)
+                    });
+                }
+                continue;
             }
             if (auto res = validateRouterState(topology, node.id, it->second); !res) {
                 return res;
@@ -1032,10 +1041,13 @@ std::expected<void, StateError> validateState(
         topoMeters.insert(meter.id);
         auto it = state.meters.find(meter.id);
         if (it == state.meters.end()) {
-            return std::unexpected(StateError{
-                StateErrorKind::MissingMeter,
-                detail::Format("DeviceState is missing required MeterId {} '{}'", meter.id.value, meter.name)
-            });
+            if (policy.requireCompleteMeterState) {
+                return std::unexpected(StateError{
+                    StateErrorKind::MissingMeter,
+                    detail::Format("DeviceState is missing required MeterId {} '{}'", meter.id.value, meter.name)
+                });
+            }
+            continue;
         }
         if (auto res = validateMeterValue(topology, meter.id, it->second); !res) {
             return res;

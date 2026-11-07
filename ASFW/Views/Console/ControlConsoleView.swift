@@ -1,18 +1,38 @@
 import SwiftUI
 
+/// The meter index mapping, in one place: the driver's batch is
+/// [18 mixer sources in the layout's order, then the 2 masters].
+enum ControlConsoleMeter {
+    static let mixerSourceCount = 18
+    static let masterBase = 18
+}
+
 /// Device Controls as a hardware console, laid out by `ControlConsoleLayout`
 /// from whatever the device publishes. Values are the driver's; a moved
 /// control shows its sent value until the device confirms or refuses it.
+/// Meter bars ride the P10b telemetry: the poller asks at the 10 Hz cap
+/// while this view is visible and stops the moment it disappears.
 struct ControlConsoleView: View {
     let snapshot: ControlSnapshot
     @ObservedObject var model: DeviceControlsViewModel
     /// False only to render the rack offscreen (ImageRenderer draws no scroll view content).
     var scrolls = true
+    @State private var meters: MeterTelemetryModel?
+    /// The receiver-lock telemetry (the dext's stream watch), fetched on
+    /// appear - the streaming state is slow-moving, no cadence needed.
+    @State private var receiverLock: DiceReceiverLock?
 
     var body: some View {
         let layout = ControlConsoleLayout(snapshot)
         let metrics = ControlConsoleMetrics(layout: layout, snapshot: snapshot)
         VStack(alignment: .leading, spacing: 16) {
+            statusLine
+            if meters?.failed == true {
+                Label("Meter refresh stopped: the driver did not answer three times in a row.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                    .padding(.horizontal, 4)
+            }
             if !layout.isEmpty {
                 Group {
                     if scrolls {
@@ -24,6 +44,20 @@ struct ControlConsoleView: View {
                 .background(Color(white: 0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.white.opacity(0.08)))
                 .environment(\.colorScheme, .dark)
+                .onAppear {
+                    if let guid = model.selectedDevice?.guid {
+                        receiverLock = model.getMeterLock(guid: guid)
+                    }
+                    if meters == nil {
+                        meters = MeterTelemetryModel(interval: 0.1, fetch: { guid in
+                            model.getMeterValues(guid: guid)
+                        })
+                    }
+                    if let guid = model.selectedDevice?.guid {
+                        meters?.appeared(guid: guid)
+                    }
+                }
+                .onDisappear { meters?.disappeared() }
             }
             let settings = layout.settings.compactMap { id in snapshot.parameters.first { $0.id == id } }
             if !settings.isEmpty {
@@ -56,6 +90,54 @@ struct ControlConsoleView: View {
         }
     }
 
+    /// The honest status line: the meters' liveness + the receiver
+    /// stream verdict. No rate - the 0.6.0 userclient has no rate
+    /// surface (that belongs to our dext's layer); unknown stays
+    /// unknown.
+    private var statusLine: some View {
+        let liveness = ControlConsoleStatus.meterLiveness(
+            nowNs: DispatchTime.now().uptimeNanoseconds,
+            batch: meters?.batch, failed: meters?.failed == true)
+        let livenessText: String = switch liveness {
+        case .never: "meters: no batch yet"
+        case .live: "meters: live"
+        case .stale(let ageMs): "meters: \(ageMs) ms old"
+        case .stopped: "meters: stopped"
+        }
+        let verdict = ControlConsoleStatus.receiverVerdict(receiverLock)
+        return HStack(spacing: 14) {
+            Text(livenessText)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(liveness == .live ? .green : .secondary)
+            if let verdict {
+                Text(verdict)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(verdict == "stream locked" ? .green : .orange)
+            } else {
+                Text("stream: no telemetry")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 4)
+    }
+
+    /// The source meters: the batch order matches the layout's mixer
+    /// source order (the driver reads them in document order).
+    private func meterSample(at position: Int) -> MeterValuesBatch.Sample? {
+        guard let batch = meters?.batch,
+              position < ControlConsoleMeter.mixerSourceCount,
+              batch.samples.indices.contains(position) else { return nil }
+        return batch.samples[position]
+    }
+
+    private func masterSample(_ index: Int) -> MeterValuesBatch.Sample? {
+        guard let batch = meters?.batch,
+              batch.samples.indices.contains(ControlConsoleMeter.masterBase + index)
+        else { return nil }
+        return batch.samples[ControlConsoleMeter.masterBase + index]
+    }
+
     static func sections(_ layout: ControlConsoleLayout) -> [Section] {
         var sections: [Section] = []
         if !layout.inputs.isEmpty { sections.append(.strips(title: "INPUTS", tint: .cyan, strips: layout.inputs)) }
@@ -74,9 +156,17 @@ struct ControlConsoleView: View {
                 }
             }
         case .mixer(let mixer):
-            AudioConsoleRackBank(title: mixer.title.uppercased(), tint: .purple) {
-                ForEach(mixer.sources) { source in
-                    ControlConsoleMixerStrip(source: source, snapshot: snapshot, model: model, metrics: metrics)
+            AudioConsoleRackBank(title: mixer.title.uppercased(), tint: .purple,
+                                 accessory: {
+                                    HStack(spacing: 8) {
+                                        ConsoleMeterBar(sample: masterSample(0), tint: .purple)
+                                        ConsoleMeterBar(sample: masterSample(1), tint: .purple)
+                                    }
+                                    .frame(height: 28)
+                                 }) {
+                ForEach(Array(mixer.sources.enumerated()), id: \.element.id) { position, source in
+                    ControlConsoleMixerStrip(source: source, snapshot: snapshot, model: model, metrics: metrics,
+                                             meterSample: meterSample(at: position))
                 }
             }
         }

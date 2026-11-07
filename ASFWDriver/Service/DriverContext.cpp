@@ -332,6 +332,11 @@ kern_return_t DriverWiring::EnsureSbp2Deps(ASFWDriver& service, ::ServiceContext
     if (d.audioRuntimeRegistry && d.sbp2SessionScheduler) {
         d.audioRuntimeRegistry->SetTimerScheduler(d.sbp2SessionScheduler.get());
     }
+    // The D3 mailbox endpoint reserves its notification range from the same
+    // shared manager the SBP-2 path uses (collision-safe, one table).
+    if (d.audioRuntimeRegistry && d.sbp2AddressSpaceManager) {
+        d.audioRuntimeRegistry->SetAddressSpaceManager(d.sbp2AddressSpaceManager.get());
+    }
     // Keeps the DICE restart quiet period.
     if (ctx.audioCoordinator && d.sbp2SessionScheduler) {
         ctx.audioCoordinator->SetSessionTimer(d.sbp2SessionScheduler.get());

@@ -25,6 +25,27 @@ extension ASFWDriverConnector {
     /// rediscovered or a write landed between reads) restart the read, at most
     /// three times. `kIOReturnUnsupported` means the device has no control
     /// projection.
+    /// The P10b meter envelope for the device (the driver coalesces the
+    /// actual device reads; this returns what the driver has - possibly a
+    /// count-0 honest "nothing measured now"). The envelope layout is the
+    /// P10a contract; parse with `MeterValuesDocument.parse`.
+    func getMeterValues(guid: UInt64) -> Result<Data, ControlsDriverError> {
+        guard isConnected, connection != 0 else { return .failure(.notConnected) }
+        let scalarInputs: [UInt64] = [guid >> 32, guid & 0xFFFF_FFFF]
+        var outSize = 64 * 1024
+        var out = Data(count: outSize)
+        let kr = out.withUnsafeMutableBytes { outPtr in
+            scalarInputs.withUnsafeBufferPointer { scalarPtr in
+                IOConnectCallMethod(connection, Method.getMeterValues.rawValue,
+                                    scalarPtr.baseAddress, 2, nil, 0, nil, nil,
+                                    outPtr.baseAddress?.assumingMemoryBound(to: UInt8.self), &outSize)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return .failure(.driver(kr)) }
+        out.count = outSize
+        return .success(out)
+    }
+
     func getControlSnapshot(guid: UInt64) -> Result<Data, ControlsDriverError> {
         guard isConnected, connection != 0 else { return .failure(.notConnected) }
         var lastCode: kern_return_t = KERN_SUCCESS
